@@ -236,6 +236,9 @@ class CrawleeAdapter:
                     await page.context.add_cookies(cookies)
                 except Exception as e:
                     logger.debug(f"Cookie injection failed: {e}")
+            # Attach network listener for compliance data
+            self.compliance_collector.attach(page)
+
             # Fix navigator.webdriver
             try:
                 await page.add_init_script("""
@@ -263,7 +266,10 @@ class CrawleeAdapter:
                 logger.debug(f"Already captured: {url[:80]}")
                 return
 
-            # Get page info for block detection
+            # === READINESS (must run before content checks for JS-rendered SPAs) ===
+            await self.readiness.wait_until_ready(page)
+
+            # Get page info for block/empty detection
             title = await page.title() or ""
             try:
                 text_preview = await page.evaluate(
@@ -290,9 +296,6 @@ class CrawleeAdapter:
                 f"[{step_num}/{effective_max}] "
                 f"Captured: {title[:50]} | {url[:60]}"
             )
-
-            # === READINESS ===
-            await self.readiness.wait_until_ready(page)
 
             # Classify page type early (needed for behavior + delay)
             page_type = PageClassifier.classify_url(url)
@@ -344,7 +347,7 @@ class CrawleeAdapter:
                     page_data["computed_styles"] = {"text_elements": page_data["computed_styles"]}
                 elif not isinstance(page_data.get("computed_styles"), dict):
                     page_data["computed_styles"] = {}
-                page_data["computed_styles"]["all_elements"] = design_data.get("all_element_styles", [])
+                page_data["computed_styles"]["all_elements"] = design_data.get("all_styles", [])
             except Exception as e:
                 logger.debug(f"Design data collection failed: {e}")
 
