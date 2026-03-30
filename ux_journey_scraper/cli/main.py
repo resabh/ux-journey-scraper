@@ -4,11 +4,14 @@ Command-line interface for UX Journey Scraper.
 
 import asyncio
 from pathlib import Path
+from urllib.parse import urlparse
 
 import click
 from ux_journey_scraper.config.scrape_config import ScrapeConfig
 from ux_journey_scraper.core.autonomous_crawler import AutonomousCrawler
+from ux_journey_scraper.core.cookie_jar import CookieJar
 from ux_journey_scraper.core.journey_recorder import Journey, JourneyRecorder
+from ux_journey_scraper.core.profile_manager import ProfileManager
 
 try:
     from ux_journey_scraper.core.app_provisioner import AppProvisioner
@@ -36,6 +39,16 @@ def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_
 
     platform_dir = _Path(platform_dir)
 
+    # Auto warm-up if profile is fresh/stale
+    pm = ProfileManager()
+    if pm.is_fresh():
+        click.echo("  Profile is fresh/stale — auto warming up...")
+        try:
+            asyncio.run(pm.warm_up(browser_type=browser_type))
+            click.echo(f"  Warm-up complete: {len(pm.get_cookies())} cookies")
+        except Exception as e:
+            click.echo(f"  Warm-up failed (continuing without): {e}")
+
     if platform.is_native:
         if not _APPIUM_AVAILABLE:
             click.echo(f"  Skipping {platform.type}: Appium not installed.")
@@ -52,11 +65,14 @@ def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_
         w = viewport.get("width", "?")
         h = viewport.get("height", "?")
         click.echo(f"Platform: {platform.type} ({w}x{h}) [crawlee engine]")
+        jar = CookieJar()
+        pm.seed_cookie_jar(jar, urlparse(scrape_config.base_url).netloc.replace("www.", ""))
         crawler = CrawleeAdapter(
             config=scrape_config,
             output_dir=str(platform_dir),
             platform=platform,
             browser_type=browser_type,
+            cookie_jar=jar,
         )
     else:
         viewport = platform.viewport or {}
@@ -70,6 +86,11 @@ def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_
         )
 
     journey = asyncio.run(crawler.crawl())
+
+    # Absorb cookies back to profile
+    if hasattr(crawler, 'cookie_jar'):
+        pm.absorb_cookie_jar(crawler.cookie_jar)
+
     output_file = platform_dir / "journey.json"
     journey.save(str(output_file))
     pages = crawler.get_stats()["pages_captured"]
@@ -398,6 +419,42 @@ def scrape(brand, platforms, output_dir, max_pages, appium_server, local, engine
     click.echo(f"All platforms complete! Total pages: {total_pages}")
     click.echo(f"Output: {output_dir}")
     click.echo(f"{'='*60}\n")
+
+
+@cli.command("warm-up")
+@click.option(
+    "--browser-type",
+    type=click.Choice(["webkit", "chromium", "firefox"]),
+    default="webkit",
+    help="Browser engine for warm-up",
+)
+def warm_up(browser_type):
+    """Warm up browser profile by visiting mainstream sites.
+
+    Visits Google, YouTube, Amazon, Wikipedia to accumulate real cookies.
+    This makes future scrapes look like a returning user, not a fresh bot.
+    Only needs to be run once — cookies persist across scrapes.
+    """
+    click.echo(f"\n{'='*60}")
+    click.echo(f"  PROFILE WARM-UP")
+    click.echo(f"{'='*60}\n")
+
+    pm = ProfileManager()
+
+    if not pm.is_fresh():
+        click.echo("Profile already exists and is not stale.")
+        click.echo(f"Cookies: {len(pm.get_cookies())} total")
+        click.echo("Use this command to refresh if needed.\n")
+
+    click.echo("Visiting mainstream sites to accumulate cookies...")
+    try:
+        asyncio.run(pm.warm_up(browser_type=browser_type))
+        click.echo(f"\nWarm-up complete! Profile saved.")
+        click.echo(f"Cookies: {len(pm.get_cookies())} total")
+    except Exception as e:
+        click.echo(f"\nWarm-up failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
