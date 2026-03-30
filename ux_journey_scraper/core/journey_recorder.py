@@ -70,6 +70,7 @@ class Journey:
     def to_dict(self):
         """Convert journey to dictionary."""
         result = {
+            "schema_version": "2.1",
             "start_url": self.start_url,
             "viewport": {"width": self.viewport[0], "height": self.viewport[1]},
             "start_time": self.start_time,

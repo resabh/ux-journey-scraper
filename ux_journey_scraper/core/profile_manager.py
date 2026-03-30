@@ -1,13 +1,15 @@
 """Persistent browser profile for detection avoidance.
 
 Maintains a long-lived cookie profile at ~/.ux-journey-scraper/profile.json
-that accumulates cookies from warm-up sites (Google, YouTube, Amazon, Wikipedia)
-and target site scrapes. This makes the scraper appear as a returning user
-with browsing history, not a fresh bot.
+that accumulates cookies from warm-up sites and target site scrapes. This
+makes the scraper appear as a returning user with browsing history, not a
+fresh bot.
 """
 
 import json
 import logging
+import os
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
@@ -22,12 +24,26 @@ DEFAULT_PROFILE_PATH = Path.home() / ".ux-journey-scraper" / "profile.json"
 class ProfileManager:
     """Manages a persistent browser profile with cookie history."""
 
-    WARMUP_SITES = {
-        "google.com": "https://www.google.com",
-        "youtube.com": "https://www.youtube.com",
-        "amazon.com": "https://www.amazon.com",
-        "wikipedia.org": "https://www.wikipedia.org",
-    }
+    # Warm-up sites grouped by category for realistic browsing persona
+    WARMUP_SITES = [
+        # Search engines (always first — that's how real sessions start)
+        {"url": "https://www.google.com", "search": "best products online shopping", "dwell": (3, 6)},
+        {"url": "https://www.google.com/search?q=latest+fashion+trends+2026", "dwell": (5, 10)},
+        # Video/social (high cookie yield)
+        {"url": "https://www.youtube.com", "dwell": (8, 15)},
+        {"url": "https://www.reddit.com", "dwell": (5, 10)},
+        # E-commerce (builds shopping persona)
+        {"url": "https://www.amazon.com", "dwell": (8, 15)},
+        {"url": "https://www.amazon.com/s?k=wireless+headphones", "dwell": (5, 10)},
+        {"url": "https://www.flipkart.com", "dwell": (5, 10)},
+        # News/reference (broadens cookie diversity)
+        {"url": "https://www.wikipedia.org", "dwell": (3, 6)},
+        {"url": "https://www.bbc.com", "dwell": (3, 6)},
+        {"url": "https://www.weather.com", "dwell": (2, 5)},
+        # Tech/tools (shows diverse browsing)
+        {"url": "https://www.github.com", "dwell": (3, 6)},
+        {"url": "https://www.stackoverflow.com", "dwell": (3, 6)},
+    ]
 
     def __init__(self, profile_path: Optional[Path] = None, max_age_days: int = 7):
         self._profile_path = profile_path or DEFAULT_PROFILE_PATH
@@ -49,11 +65,13 @@ class ProfileManager:
             logger.warning(f"Profile load failed: {e}")
 
     def _save(self):
-        """Persist profile to disk."""
+        """Persist profile to disk with restricted permissions (owner-only)."""
         self._profile_path.parent.mkdir(parents=True, exist_ok=True)
         self._saved_at = datetime.utcnow().isoformat()
         data = {"saved_at": self._saved_at, "domains": self._domains}
         self._profile_path.write_text(json.dumps(data, indent=2, default=str))
+        # Restrict to owner-only (contains session tokens)
+        os.chmod(self._profile_path, 0o600)
         logger.debug(f"Profile saved: {len(self._domains)} domains")
 
     def is_fresh(self) -> bool:
@@ -105,28 +123,61 @@ class ProfileManager:
         logger.info(f"Absorbed {absorbed} cookies from crawl into profile")
 
     async def warm_up(self, browser_type: str = "webkit") -> None:
-        """Visit mainstream sites to accumulate real cookies."""
+        """Visit mainstream sites to build a realistic browsing persona.
+
+        Browses 12 sites across search, video, e-commerce, news, and tech
+        categories. Performs searches, scrolls, and dwells on pages to
+        accumulate real cookies and build browsing history that anti-bot
+        systems expect from genuine users.
+        """
         from playwright.async_api import async_playwright
         from ux_journey_scraper.core.human_behaviour import HumanBehaviour
 
         logger.info("Starting profile warm-up...")
+
+        # Shuffle non-search sites for variety (keep Google first)
+        sites = list(self.WARMUP_SITES)
+        first_two = sites[:2]  # Google searches always first
+        rest = sites[2:]
+        random.shuffle(rest)
+        sites = first_two + rest
+
         async with async_playwright() as p:
-            browser = await p.webkit.launch(headless=True)
+            # Use the requested browser engine
+            browser_launcher = getattr(p, browser_type, p.webkit)
+            browser = await browser_launcher.launch(headless=True)
             context = await browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15",
             )
             page = await context.new_page()
+            visited = 0
 
-            for domain, url in self.WARMUP_SITES.items():
+            for site in sites:
+                url = site["url"]
+                min_dwell, max_dwell = site["dwell"]
                 try:
-                    logger.info(f"  Warming up: {url}")
+                    logger.info(f"  Warming up: {url[:60]}")
                     await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                    await HumanBehaviour.human_scroll(page, direction="down", distance=500)
-                    await HumanBehaviour.human_delay(5000, 10000, reason="page_load")
-                except Exception as e:
-                    logger.warning(f"  Warm-up failed for {domain}: {e}")
 
+                    # Scroll down naturally
+                    scroll_distance = random.randint(300, 800)
+                    await HumanBehaviour.human_scroll(page, direction="down", distance=scroll_distance)
+
+                    # Dwell on page
+                    dwell_ms = random.randint(min_dwell * 1000, max_dwell * 1000)
+                    await HumanBehaviour.human_delay(dwell_ms, dwell_ms + 2000, reason="page_load")
+
+                    # Sometimes scroll more (50% chance)
+                    if random.random() > 0.5:
+                        await HumanBehaviour.human_scroll(page, direction="down", distance=random.randint(200, 500))
+                        await HumanBehaviour.human_delay(2000, 4000, reason="page_load")
+
+                    visited += 1
+                except Exception as e:
+                    logger.warning(f"  Warm-up failed for {url[:40]}: {e}")
+
+            # Harvest all cookies
             cookies = await context.cookies()
             domain_cookies: dict[str, list] = {}
             for cookie in cookies:
@@ -139,5 +190,8 @@ class ProfileManager:
                 self._domains[domain] = cooks
 
             self._save()
-            logger.info(f"Warm-up complete: {len(cookies)} cookies from {len(domain_cookies)} domains")
+            logger.info(
+                f"Warm-up complete: {len(cookies)} cookies from "
+                f"{len(domain_cookies)} domains ({visited}/{len(sites)} sites visited)"
+            )
             await browser.close()

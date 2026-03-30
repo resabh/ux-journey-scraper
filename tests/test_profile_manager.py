@@ -75,10 +75,13 @@ class TestProfileManager(unittest.TestCase):
         self.assertTrue(pm2.is_fresh())
 
     def test_warmup_sites_constant(self):
-        self.assertIn("google.com", ProfileManager.WARMUP_SITES)
-        self.assertIn("youtube.com", ProfileManager.WARMUP_SITES)
-        self.assertIn("amazon.com", ProfileManager.WARMUP_SITES)
-        self.assertIn("wikipedia.org", ProfileManager.WARMUP_SITES)
+        urls = [s["url"] for s in ProfileManager.WARMUP_SITES]
+        self.assertTrue(any("google.com" in u for u in urls))
+        self.assertTrue(any("youtube.com" in u for u in urls))
+        self.assertTrue(any("amazon.com" in u for u in urls))
+        self.assertTrue(any("wikipedia.org" in u for u in urls))
+        # Should have diverse sites for persona building
+        self.assertGreaterEqual(len(ProfileManager.WARMUP_SITES), 8)
 
 
 if __name__ == "__main__":

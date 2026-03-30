@@ -128,6 +128,10 @@ class AntiCrawlerDetector:
     def is_empty_page(html: str, text_content: str) -> bool:
         """Check if a page is effectively empty.
 
+        A page is empty only if it has almost no text AND almost no HTML
+        structure. This avoids false positives on image-heavy pages
+        (fashion, hero sections) that have minimal text but rich content.
+
         Args:
             html: Raw HTML of the page.
             text_content: Extracted visible text content.
@@ -135,7 +139,19 @@ class AntiCrawlerDetector:
         Returns:
             True if the page appears to be empty/placeholder.
         """
-        return len(text_content.strip()) < 100
+        text_len = len(text_content.strip())
+        html_len = len(html.strip())
+
+        # Very short text AND very short HTML = truly empty
+        if text_len < 50 and html_len < 500:
+            return True
+
+        # Has meaningful HTML structure (images, divs, etc.) = not empty
+        if html_len > 2000:
+            return False
+
+        # Moderate HTML but almost no text = suspicious but allow
+        return text_len < 20
 
     @staticmethod
     def is_block_page(title: str, text_preview: str) -> bool:

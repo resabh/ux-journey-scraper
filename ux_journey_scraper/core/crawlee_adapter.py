@@ -11,6 +11,7 @@ journey recording) runs on top of crawlee's page loading.
 import asyncio
 import logging
 import random
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -135,7 +136,7 @@ class CrawleeAdapter:
         return any(sig in combined for sig in BLOCK_SIGNATURES)
 
     def _effective_max_pages(self) -> int:
-        """Return max pages from visit plan if set, otherwise from config."""
+        """Return max pages — 0 means unlimited (crawl all unique pages)."""
         if self.visit_plan:
             return self.visit_plan.max_pages
         return self.config.crawler.max_pages
@@ -174,12 +175,13 @@ class CrawleeAdapter:
         logger.info(f"Starting crawlee crawl: {self.config.target.get('name', 'Unknown')}")
         logger.info(f"Base URL: {self.config.base_url}")
         logger.info(f"Platform: {self.platform.type}")
-        logger.info(f"Max pages: {effective_max}")
+        logger.info(f"Max pages: {effective_max or 'unlimited'}")
 
         # Phase 1: Sitemap discovery — find all known URLs upfront
+        sitemap_limit = effective_max * 2 if effective_max else 10000
         sitemap = SitemapParser(
             self.config.base_url,
-            max_urls=effective_max * 2,  # Discover more than we'll crawl
+            max_urls=sitemap_limit,
         )
         sitemap_urls = await sitemap.discover_all()
 
@@ -216,13 +218,21 @@ class CrawleeAdapter:
         # + inter-page delay (up to 45s) + page load + analysis
         handler_timeout = timedelta(minutes=5)
 
+        # Concurrency=1: real users don't open 10 tabs simultaneously
+        from crawlee import ConcurrencySettings
+        concurrency = ConcurrencySettings(
+            min_concurrency=1,
+            max_concurrency=1,
+        )
+
         crawler = PlaywrightCrawler(
-            max_requests_per_crawl=effective_max,
+            max_requests_per_crawl=effective_max or None,  # 0/None = unlimited
             headless=self.config.crawler.headless,
             browser_type=self.browser_type,
             max_request_retries=self.config.crawler.max_retries,
             use_incognito_pages=True,
             request_handler_timeout=handler_timeout,
+            concurrency_settings=concurrency,
         )
 
         # Pre-navigation hook: inject cookies + fix webdriver
@@ -292,8 +302,9 @@ class CrawleeAdapter:
             self.captured_urls.add(normalized)
             step_num = self.pages_captured
 
+            label = f"{effective_max}" if effective_max else "all"
             logger.info(
-                f"[{step_num}/{effective_max}] "
+                f"[{step_num}/{label}] "
                 f"Captured: {title[:50]} | {url[:60]}"
             )
 
@@ -304,7 +315,7 @@ class CrawleeAdapter:
             try:
                 await self.behavior.run(page, page_type=page_type)
             except Exception as e:
-                logger.debug(f"Behavior sequence failed: {e}")
+                logger.warning(f"Behavior sequence failed: {e}")
 
             # === ANALYSIS LAYER ===
 
@@ -335,7 +346,7 @@ class CrawleeAdapter:
                 )
                 page_data.update(compliance_data)
             except Exception as e:
-                logger.debug(f"Compliance data collection failed: {e}")
+                logger.warning(f"Compliance data collection failed: {e}")
 
             # 3.5 Design system data (for DS builder)
             try:
@@ -349,7 +360,7 @@ class CrawleeAdapter:
                     page_data["computed_styles"] = {}
                 page_data["computed_styles"]["all_elements"] = design_data.get("all_styles", [])
             except Exception as e:
-                logger.debug(f"Design data collection failed: {e}")
+                logger.warning(f"Design data collection failed: {e}")
 
             # 4. Framework detection
             if self.cdp_detector:
@@ -365,7 +376,7 @@ class CrawleeAdapter:
                 if fill_result["fields_filled"] > 0:
                     logger.info(f"Filled {fill_result['fields_filled']} form fields")
             except Exception as e:
-                logger.debug(f"Form fill failed: {e}")
+                logger.warning(f"Form fill failed: {e}")
 
             # 6. Build journey step
             step = JourneyStep(
@@ -383,7 +394,7 @@ class CrawleeAdapter:
                 if page_cookies:
                     self.cookie_jar.update(self.base_domain, page_cookies)
             except Exception as e:
-                logger.debug(f"Cookie harvest failed: {e}")
+                logger.warning(f"Cookie harvest failed: {e}")
 
             # 8. Enqueue internal links (crawlee handles dedup)
             try:
@@ -401,6 +412,12 @@ class CrawleeAdapter:
 
         # Complete journey
         self.journey.complete()
+
+        # Clean up crawlee storage artifacts
+        storage_dir = Path("storage")
+        if storage_dir.exists():
+            shutil.rmtree(storage_dir, ignore_errors=True)
+            logger.debug("Cleaned up crawlee storage directory")
 
         logger.info(f"Crawl complete: {self.pages_captured} pages captured")
 

@@ -29,12 +29,8 @@ except ImportError:
     _CRAWLEE_AVAILABLE = False
 
 
-def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_type="webkit"):
-    """Shared crawl execution used by both 'crawl' and 'scrape' commands.
-
-    Args:
-        engine: "auto" (crawlee if available, else local), "crawlee", or "local"
-    """
+async def _run_platform_async(scrape_config, platform, platform_dir, engine="auto", browser_type="webkit"):
+    """Async crawl execution — single event loop for warm-up + crawl."""
     from pathlib import Path as _Path
 
     platform_dir = _Path(platform_dir)
@@ -44,7 +40,7 @@ def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_
     if pm.is_fresh():
         click.echo("  Profile is fresh/stale — auto warming up...")
         try:
-            asyncio.run(pm.warm_up(browser_type=browser_type))
+            await pm.warm_up(browser_type=browser_type)
             click.echo(f"  Warm-up complete: {len(pm.get_cookies())} cookies")
         except Exception as e:
             click.echo(f"  Warm-up failed (continuing without): {e}")
@@ -85,7 +81,7 @@ def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_
             platform=platform,
         )
 
-    journey = asyncio.run(crawler.crawl())
+    journey = await crawler.crawl()
 
     # Absorb cookies back to profile
     if hasattr(crawler, 'cookie_jar'):
@@ -96,6 +92,11 @@ def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_
     pages = crawler.get_stats()["pages_captured"]
     click.echo(f"  {platform.type}: {pages} pages -> {output_file}")
     return pages
+
+
+def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_type="webkit"):
+    """Sync wrapper — single asyncio.run() for the entire platform crawl."""
+    return asyncio.run(_run_platform_async(scrape_config, platform, platform_dir, engine, browser_type))
 
 
 @click.group()
@@ -446,11 +447,11 @@ def warm_up(browser_type):
         click.echo(f"Cookies: {len(pm.get_cookies())} total")
         click.echo("Use this command to refresh if needed.\n")
 
-    click.echo("Visiting mainstream sites to accumulate cookies...")
+    click.echo("Visiting mainstream sites to build browsing persona...")
     try:
         asyncio.run(pm.warm_up(browser_type=browser_type))
         click.echo(f"\nWarm-up complete! Profile saved.")
-        click.echo(f"Cookies: {len(pm.get_cookies())} total")
+        click.echo(f"Cookies: {len(pm.get_cookies())} total across {len(pm._domains)} domains")
     except Exception as e:
         click.echo(f"\nWarm-up failed: {e}")
         import traceback
