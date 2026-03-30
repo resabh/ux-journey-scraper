@@ -10,16 +10,21 @@ journey recording) runs on top of crawlee's page loading.
 
 import asyncio
 import logging
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
 from ux_journey_scraper.config.scrape_config import PlatformConfig, ScrapeConfig
+from ux_journey_scraper.core.behavior_sequencer import BehaviorSequencer
 from ux_journey_scraper.core.compliance_data_collector import ComplianceDataCollector
+from ux_journey_scraper.core.cookie_jar import CookieJar
 from ux_journey_scraper.core.form_filler import FormFiller
 from ux_journey_scraper.core.journey_recorder import Journey, JourneyStep
+from ux_journey_scraper.core.navigation_randomizer import NavigationRandomizer
 from ux_journey_scraper.core.page_analyzer import PageAnalyzer
+from ux_journey_scraper.core.page_readiness import PageReadinessEngine
 from ux_journey_scraper.core.screenshot_manager import ScreenshotManager
 from ux_journey_scraper.core.sitemap_parser import SitemapParser
 
@@ -78,6 +83,8 @@ class CrawleeAdapter:
         output_dir: str = "journey_output",
         platform: Optional[PlatformConfig] = None,
         browser_type: str = "webkit",
+        cookie_jar: Optional[CookieJar] = None,
+        visit_plan=None,  # Optional[VisitPlan] — avoid import if not available
     ):
         if not _CRAWLEE_AVAILABLE:
             raise ImportError(
@@ -91,6 +98,12 @@ class CrawleeAdapter:
 
         self.platform = platform or config.platforms[0]
         self.base_domain = urlparse(config.base_url).netloc.replace("www.", "")
+
+        # Detection avoidance components
+        self.cookie_jar = cookie_jar or CookieJar()
+        self.visit_plan = visit_plan
+        self.behavior = BehaviorSequencer()
+        self.readiness = PageReadinessEngine(timeout_ms=15000)
 
         # Our analysis components
         self.screenshot_manager = ScreenshotManager(
@@ -121,6 +134,31 @@ class CrawleeAdapter:
         combined = (title + " " + text_preview).lower()
         return any(sig in combined for sig in BLOCK_SIGNATURES)
 
+    def _effective_max_pages(self) -> int:
+        """Return max pages from visit plan if set, otherwise from config."""
+        if self.visit_plan:
+            return self.visit_plan.max_pages
+        return self.config.crawler.max_pages
+
+    def _calculate_page_delay(self, page_type: str) -> float:
+        """Inter-page delay in seconds with page-type modifier and beta jitter.
+
+        Longer delays for transactional pages (cart, checkout) where real users
+        spend more time. Shorter delays for informational pages (policy, info).
+        Beta distribution gives natural variance skewed toward shorter pauses.
+        """
+        base_ms = self.config.session_strategy.page_delay_ms
+        modifiers = {
+            "policy": 0.5, "info": 0.5, "content": 0.7, "homepage": 0.8,
+            "search": 0.8, "plp": 1.0, "pdp": 1.0, "cart": 1.3,
+            "checkout": 1.3, "account": 1.0, "other": 0.8,
+        }
+        modifier = modifiers.get(page_type, 0.8)
+        adjusted_ms = base_ms * modifier
+        t = random.betavariate(2, 5)
+        delay_ms = adjusted_ms * 0.5 + adjusted_ms * t
+        return delay_ms / 1000.0
+
     async def crawl(self) -> Journey:
         """Run a full-site crawl using crawlee's PlaywrightCrawler.
 
@@ -132,15 +170,16 @@ class CrawleeAdapter:
         Returns:
             Journey object with all captured steps.
         """
+        effective_max = self._effective_max_pages()
         logger.info(f"Starting crawlee crawl: {self.config.target.get('name', 'Unknown')}")
         logger.info(f"Base URL: {self.config.base_url}")
         logger.info(f"Platform: {self.platform.type}")
-        logger.info(f"Max pages: {self.config.crawler.max_pages}")
+        logger.info(f"Max pages: {effective_max}")
 
         # Phase 1: Sitemap discovery — find all known URLs upfront
         sitemap = SitemapParser(
             self.config.base_url,
-            max_urls=self.config.crawler.max_pages * 2,  # Discover more than we'll crawl
+            max_urls=effective_max * 2,  # Discover more than we'll crawl
         )
         sitemap_urls = await sitemap.discover_all()
 
@@ -153,11 +192,20 @@ class CrawleeAdapter:
         else:
             logger.info("No sitemap found, relying on link discovery from pages")
 
-        # Phase 2: Smart page selection
+        # Phase 2: Smart page selection + navigation randomization
         if sitemap_urls:
             selected = PageSelector.select(seed_urls, self.base_domain)
-            seed_urls = [s["url"] for s in selected]
-            logger.info(f"Smart selection: {len(seed_urls)} pages to capture")
+            logger.info(f"Smart selection: {len(selected)} pages to capture")
+
+            if self.visit_plan:
+                seed_urls = NavigationRandomizer.randomize(
+                    selected,
+                    session_goal=self.visit_plan.goal,
+                    target_page_types=self.visit_plan.target_page_types,
+                )
+                logger.info(f"Navigation randomized for goal: {self.visit_plan.goal}")
+            else:
+                seed_urls = [s["url"] for s in selected]
 
         # Phase 3: Crawl with crawlee
         viewport = self.platform.viewport or {"width": 1920, "height": 1080}
@@ -165,12 +213,34 @@ class CrawleeAdapter:
         # use_incognito_pages=True required for WebKit (avoids persistent
         # context which calls CDP setDownloadBehavior — unsupported in WebKit)
         crawler = PlaywrightCrawler(
-            max_requests_per_crawl=self.config.crawler.max_pages,
+            max_requests_per_crawl=effective_max,
             headless=self.config.crawler.headless,
             browser_type=self.browser_type,
             max_request_retries=self.config.crawler.max_retries,
             use_incognito_pages=True,
         )
+
+        # Pre-navigation hook: inject cookies + fix webdriver
+        @crawler.pre_navigation_hook
+        async def on_before_navigation(context, goto_options):
+            page = context.page
+            # Inject cookies from jar
+            cookies = self.cookie_jar.get(self.base_domain)
+            if cookies:
+                try:
+                    await page.context.add_cookies(cookies)
+                except Exception as e:
+                    logger.debug(f"Cookie injection failed: {e}")
+            # Fix navigator.webdriver
+            try:
+                await page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => false,
+                        configurable: true
+                    })
+                """)
+            except Exception as e:
+                logger.debug(f"Webdriver fix failed: {e}")
 
         @crawler.router.default_handler
         async def handle_page(context: PlaywrightCrawlingContext) -> None:
@@ -212,13 +282,25 @@ class CrawleeAdapter:
             step_num = self.pages_captured
 
             logger.info(
-                f"[{step_num}/{self.config.crawler.max_pages}] "
+                f"[{step_num}/{effective_max}] "
                 f"Captured: {title[:50]} | {url[:60]}"
             )
 
-            # === OUR ANALYSIS LAYER ===
+            # === READINESS ===
+            await self.readiness.wait_until_ready(page)
 
-            # 1. Screenshot with PII blur
+            # Classify page type early (needed for behavior + delay)
+            page_type = PageClassifier.classify_url(url)
+
+            # === HUMAN BEHAVIOR ===
+            try:
+                await self.behavior.run(page, page_type=page_type)
+            except Exception as e:
+                logger.debug(f"Behavior sequence failed: {e}")
+
+            # === ANALYSIS LAYER ===
+
+            # 1. Screenshot (page scrolled to top by behavior sequencer)
             screenshot_path = None
             try:
                 screenshot_path = await self.screenshot_manager.capture_screenshot(
@@ -287,11 +369,24 @@ class CrawleeAdapter:
             )
             self.journey.add_step(step)
 
-            # 7. Enqueue internal links (crawlee handles dedup)
+            # 7. Cookie harvest
+            try:
+                page_cookies = await context.page.context.cookies()
+                if page_cookies:
+                    self.cookie_jar.update(self.base_domain, page_cookies)
+            except Exception as e:
+                logger.debug(f"Cookie harvest failed: {e}")
+
+            # 8. Enqueue internal links (crawlee handles dedup)
             try:
                 await context.enqueue_links(strategy="same-domain")
             except Exception as e:
                 logger.debug(f"Link enqueue failed: {e}")
+
+            # 9. Inter-page delay (human pacing)
+            delay = self._calculate_page_delay(page_type)
+            logger.debug(f"Inter-page delay: {delay:.1f}s ({page_type})")
+            await asyncio.sleep(delay)
 
         # Run the crawl with all seed URLs (sitemap + base URL)
         await crawler.run(seed_urls)
