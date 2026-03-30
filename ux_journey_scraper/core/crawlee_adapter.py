@@ -11,7 +11,7 @@ journey recording) runs on top of crawlee's page loading.
 import asyncio
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -212,12 +212,17 @@ class CrawleeAdapter:
 
         # use_incognito_pages=True required for WebKit (avoids persistent
         # context which calls CDP setDownloadBehavior — unsupported in WebKit)
+        # Handler timeout must accommodate behavior simulation (up to 90s dwell)
+        # + inter-page delay (up to 45s) + page load + analysis
+        handler_timeout = timedelta(minutes=5)
+
         crawler = PlaywrightCrawler(
             max_requests_per_crawl=effective_max,
             headless=self.config.crawler.headless,
             browser_type=self.browser_type,
             max_request_retries=self.config.crawler.max_retries,
             use_incognito_pages=True,
+            request_handler_timeout=handler_timeout,
         )
 
         # Pre-navigation hook: inject cookies + fix webdriver
