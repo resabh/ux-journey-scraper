@@ -21,8 +21,16 @@ from urllib.parse import urlparse
 from ..config.scrape_config import ScrapeConfig
 from .autonomous_crawler import AutonomousCrawler
 from .cookie_jar import CookieJar
+from .profile_manager import ProfileManager
 from .proxy_rotator import ProxyRotator
 from .session_planner import SessionPlanner, VisitPlan
+
+try:
+    from .crawlee_adapter import CrawleeAdapter, is_crawlee_available
+
+    _CRAWLEE_AVAILABLE = is_crawlee_available()
+except ImportError:
+    _CRAWLEE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +41,16 @@ class CrawlOrchestrator:
     Supports both session-split and continuous modes.
     """
 
-    def __init__(self, config: ScrapeConfig):
+    def __init__(self, config: ScrapeConfig, profile_manager: Optional[ProfileManager] = None):
         """
         Initialize orchestrator.
 
         Args:
             config: Full scrape configuration
+            profile_manager: Optional ProfileManager for cookie persistence across scrapes
         """
         self.config = config
+        self.profile_manager = profile_manager or ProfileManager()
 
     async def run_all(self) -> Dict:
         """
@@ -94,6 +104,9 @@ class CrawlOrchestrator:
             cookie_jar.load_from_disk()
             logger.info(f"Resuming: {len(completed_session_ids)} sessions already done")
 
+        # Seed cookie jar from profile on first run
+        self.profile_manager.seed_cookie_jar(cookie_jar, domain)
+
         for i, plan in enumerate(visit_plans):
             # Skip already-completed sessions (resume)
             if plan.session_id in completed_session_ids:
@@ -117,14 +130,24 @@ class CrawlOrchestrator:
             # Get proxy for this session
             proxy_config = proxy_rotator.get_for_slot(plan.proxy_slot)
 
-            # Run visit session
-            crawler = AutonomousCrawler(
-                config=self.config,
-                visit_plan=plan,
-                cookie_jar=cookie_jar,
-                proxy_override=proxy_config,
-                output_dir=str(output_dir),
-            )
+            # Run visit session — use CrawleeAdapter if available
+            if _CRAWLEE_AVAILABLE:
+                crawler = CrawleeAdapter(
+                    config=self.config,
+                    output_dir=str(output_dir / plan.session_id),
+                    platform=plan.platform,
+                    browser_type="webkit",
+                    cookie_jar=cookie_jar,
+                    visit_plan=plan,
+                )
+            else:
+                crawler = AutonomousCrawler(
+                    config=self.config,
+                    visit_plan=plan,
+                    cookie_jar=cookie_jar,
+                    proxy_override=proxy_config,
+                    output_dir=str(output_dir),
+                )
 
             try:
                 journey = await crawler.crawl()
@@ -132,10 +155,12 @@ class CrawlOrchestrator:
                 all_screens.extend(screens)
                 logger.info(f"  → {len(screens)} screens captured")
 
-                # Update cookie jar
-                cookies = await crawler.get_cookies()
-                if cookies:
-                    cookie_jar.update(domain, cookies)
+                # CrawleeAdapter updates cookie_jar internally during crawl.
+                # AutonomousCrawler needs explicit cookie harvest.
+                if not _CRAWLEE_AVAILABLE:
+                    cookies = await crawler.get_cookies()
+                    if cookies:
+                        cookie_jar.update(domain, cookies)
 
                 # Checkpoint
                 completed_session_ids.add(plan.session_id)
@@ -147,6 +172,9 @@ class CrawlOrchestrator:
                 logger.error(f"Session {plan.session_id} failed: {e}", exc_info=True)
                 # Extended cooldown after failure
                 await asyncio.sleep(self.config.session_strategy.max_cooldown_sec * 2)
+
+        # Absorb crawl cookies back into profile
+        self.profile_manager.absorb_cookie_jar(cookie_jar)
 
         # Build final context
         context = self._build_context(all_screens, run_id, output_dir)
@@ -166,17 +194,29 @@ class CrawlOrchestrator:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         all_screens = []
+        domain = urlparse(self.config.base_url).netloc
+        cookie_jar = CookieJar(persist_path=output_dir / "cookie_jar.json")
+        self.profile_manager.seed_cookie_jar(cookie_jar, domain)
 
         for platform in self.config.platforms:
             for auth_state in self._auth_states():
                 logger.info(f"Crawling: {platform.type} / {auth_state}")
 
-                crawler = AutonomousCrawler(
-                    config=self.config,
-                    platform=platform,
-                    auth_state=auth_state,
-                    output_dir=str(output_dir),
-                )
+                if _CRAWLEE_AVAILABLE:
+                    crawler = CrawleeAdapter(
+                        config=self.config,
+                        output_dir=str(output_dir / platform.type),
+                        platform=platform,
+                        browser_type="webkit",
+                        cookie_jar=cookie_jar,
+                    )
+                else:
+                    crawler = AutonomousCrawler(
+                        config=self.config,
+                        platform=platform,
+                        auth_state=auth_state,
+                        output_dir=str(output_dir),
+                    )
 
                 try:
                     journey = await crawler.crawl()
@@ -186,6 +226,8 @@ class CrawlOrchestrator:
 
                 except Exception as e:
                     logger.error(f"Crawler failed: {e}", exc_info=True)
+
+        self.profile_manager.absorb_cookie_jar(cookie_jar)
 
         context = self._build_context(all_screens, run_id, output_dir)
         logger.info(f"Crawl complete: {len(all_screens)} total screens")
