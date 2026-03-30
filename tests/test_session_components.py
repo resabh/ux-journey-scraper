@@ -57,6 +57,24 @@ class TestSessionStrategy(unittest.TestCase):
         self.assertFalse(strategy.persist_cookies)
         self.assertTrue(strategy.rotate_ip_per_session)
 
+    def test_page_delay_ms_default(self):
+        """Test page_delay_ms defaults to 45000."""
+        from ux_journey_scraper.config.scrape_config import SessionStrategy
+        strategy = SessionStrategy()
+        self.assertEqual(strategy.page_delay_ms, 45000)
+
+    def test_page_delay_ms_custom(self):
+        """Test page_delay_ms accepts custom value."""
+        from ux_journey_scraper.config.scrape_config import SessionStrategy
+        strategy = SessionStrategy(page_delay_ms=30000)
+        self.assertEqual(strategy.page_delay_ms, 30000)
+
+    def test_page_delay_ms_negative_raises(self):
+        """Test page_delay_ms rejects negative values."""
+        from ux_journey_scraper.config.scrape_config import SessionStrategy
+        with self.assertRaises(ValueError):
+            SessionStrategy(page_delay_ms=-1)
+
 
 class TestProxySettings(unittest.TestCase):
     """Test ProxySettings dataclass."""

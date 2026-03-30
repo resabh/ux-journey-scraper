@@ -187,6 +187,7 @@ class SessionStrategy:
     randomize_entry_points: bool = True  # Don't always start from homepage
     rotate_ip_per_session: bool = False  # Rotate proxy IP every session
     rotate_ip_per_n_sessions: int = 3  # Rotate every N sessions (if above is False)
+    page_delay_ms: int = 45000  # Inter-page delay (ms) — human browsing pace
 
     def __post_init__(self):
         """Validate session strategy configuration."""
@@ -204,6 +205,8 @@ class SessionStrategy:
             raise ValueError("max_cooldown_sec must be >= min_cooldown_sec")
         if self.rotate_ip_per_n_sessions < 1:
             raise ValueError("rotate_ip_per_n_sessions must be at least 1")
+        if self.page_delay_ms < 0:
+            raise ValueError("page_delay_ms must be non-negative")
 
 
 @dataclass
