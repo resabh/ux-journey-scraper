@@ -222,7 +222,7 @@ class CrawleeAdapter:
 
         # Pre-navigation hook: inject cookies + fix webdriver
         @crawler.pre_navigation_hook
-        async def on_before_navigation(context, goto_options):
+        async def on_before_navigation(context):
             page = context.page
             # Inject cookies from jar
             cookies = self.cookie_jar.get(self.base_domain)
