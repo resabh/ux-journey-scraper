@@ -132,17 +132,40 @@ class DesignDataCollector:
                 assets.stylesheets.push(el.href);
             });
 
+            // Font sources: preload, preconnect, and Google Fonts links
             document.querySelectorAll('link[rel="preload"][as="font"][href]').forEach(el => {
                 assets.fonts.push(el.href);
             });
-            document.querySelectorAll('link[rel="preconnect"][href]').forEach(el => {
+            document.querySelectorAll('link[href*="fonts.googleapis.com"], link[href*="fonts.gstatic.com"]').forEach(el => {
                 assets.fonts.push(el.href);
             });
+
+            // Extract @font-face URLs from loaded stylesheets
+            try {
+                for (const sheet of document.styleSheets) {
+                    try {
+                        for (const rule of sheet.cssRules) {
+                            if (rule instanceof CSSFontFaceRule) {
+                                const src = rule.style.getPropertyValue('src');
+                                const family = rule.style.getPropertyValue('font-family').replace(/['"]/g, '');
+                                const urlMatches = src.match(/url\\(["']?([^"')]+)["']?\\)/g) || [];
+                                for (const m of urlMatches) {
+                                    const url = m.replace(/url\\(["']?/, '').replace(/["']?\\)/, '');
+                                    assets.fonts.push(url);
+                                }
+                                if (family && !assets._fontFamilies) assets._fontFamilies = [];
+                                if (family) assets._fontFamilies.push(family);
+                            }
+                        }
+                    } catch(e) { /* CORS: skip cross-origin sheets */ }
+                }
+            } catch(e) {}
 
             // Deduplicate
             assets.images = [...new Set(assets.images)];
             assets.stylesheets = [...new Set(assets.stylesheets)];
             assets.fonts = [...new Set(assets.fonts)];
+            if (assets._fontFamilies) assets._fontFamilies = [...new Set(assets._fontFamilies)];
 
             return assets;
         } catch(e) {

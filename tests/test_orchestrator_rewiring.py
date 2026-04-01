@@ -32,6 +32,31 @@ class TestOrchestratorUsesProfileManager(unittest.TestCase):
         orch = CrawlOrchestrator(config)
         self.assertIsInstance(orch.profile_manager, ProfileManager)
 
+    def test_orchestrator_browser_type_and_engine(self):
+        from ux_journey_scraper.core.crawl_orchestrator import CrawlOrchestrator
+
+        config = self._make_config()
+        orch = CrawlOrchestrator(config, browser_type="chromium", engine="local")
+        self.assertEqual(orch.browser_type, "chromium")
+        self.assertEqual(orch.engine, "local")
+        self.assertFalse(orch._use_crawlee())
+
+    def test_orchestrator_defaults(self):
+        from ux_journey_scraper.core.crawl_orchestrator import CrawlOrchestrator
+
+        config = self._make_config()
+        orch = CrawlOrchestrator(config)
+        self.assertEqual(orch.browser_type, "webkit")
+        self.assertEqual(orch.engine, "auto")
+        self.assertTrue(orch.auto_warmup)
+
+    def test_use_crawlee_engine_forced(self):
+        from ux_journey_scraper.core.crawl_orchestrator import CrawlOrchestrator
+
+        config = self._make_config()
+        orch = CrawlOrchestrator(config, engine="crawlee")
+        self.assertTrue(orch._use_crawlee())
+
     def _make_config(self):
         return ScrapeConfig(
             target={"name": "Test", "base_url": "https://example.com"},

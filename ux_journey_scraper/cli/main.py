@@ -4,99 +4,19 @@ Command-line interface for UX Journey Scraper.
 
 import asyncio
 from pathlib import Path
-from urllib.parse import urlparse
 
 import click
 from ux_journey_scraper.config.scrape_config import ScrapeConfig
-from ux_journey_scraper.core.autonomous_crawler import AutonomousCrawler
-from ux_journey_scraper.core.cookie_jar import CookieJar
+from ux_journey_scraper.core.crawl_orchestrator import CrawlOrchestrator
 from ux_journey_scraper.core.journey_recorder import Journey, JourneyRecorder
 from ux_journey_scraper.core.profile_manager import ProfileManager
 
 try:
     from ux_journey_scraper.core.app_provisioner import AppProvisioner
-    from ux_journey_scraper.core.appium_crawler import AppiumCrawler
 
     _APPIUM_AVAILABLE = True
 except ImportError:
     _APPIUM_AVAILABLE = False
-
-try:
-    from ux_journey_scraper.core.crawlee_adapter import CrawleeAdapter, is_crawlee_available
-
-    _CRAWLEE_AVAILABLE = is_crawlee_available()
-except ImportError:
-    _CRAWLEE_AVAILABLE = False
-
-
-async def _run_platform_async(scrape_config, platform, platform_dir, engine="auto", browser_type="webkit"):
-    """Async crawl execution — single event loop for warm-up + crawl."""
-    from pathlib import Path as _Path
-
-    platform_dir = _Path(platform_dir)
-
-    # Auto warm-up if profile is fresh/stale
-    pm = ProfileManager()
-    if pm.is_fresh():
-        click.echo("  Profile is fresh/stale — auto warming up...")
-        try:
-            await pm.warm_up(browser_type=browser_type)
-            click.echo(f"  Warm-up complete: {len(pm.get_cookies())} cookies")
-        except Exception as e:
-            click.echo(f"  Warm-up failed (continuing without): {e}")
-
-    if platform.is_native:
-        if not _APPIUM_AVAILABLE:
-            click.echo(f"  Skipping {platform.type}: Appium not installed.")
-            click.echo("  Install: pip install 'ux-journey-scraper[native]'")
-            return 0
-        click.echo(f"Platform: {platform.type} (native app via Appium)")
-        crawler = AppiumCrawler(
-            config=scrape_config,
-            output_dir=str(platform_dir),
-            platform=platform,
-        )
-    elif engine == "crawlee" or (engine == "auto" and _CRAWLEE_AVAILABLE):
-        viewport = platform.viewport or {}
-        w = viewport.get("width", "?")
-        h = viewport.get("height", "?")
-        click.echo(f"Platform: {platform.type} ({w}x{h}) [crawlee engine]")
-        jar = CookieJar()
-        pm.seed_cookie_jar(jar, urlparse(scrape_config.base_url).netloc.replace("www.", ""))
-        crawler = CrawleeAdapter(
-            config=scrape_config,
-            output_dir=str(platform_dir),
-            platform=platform,
-            browser_type=browser_type,
-            cookie_jar=jar,
-        )
-    else:
-        viewport = platform.viewport or {}
-        w = viewport.get("width", "?")
-        h = viewport.get("height", "?")
-        click.echo(f"Platform: {platform.type} ({w}x{h}) [local engine]")
-        crawler = AutonomousCrawler(
-            config=scrape_config,
-            output_dir=str(platform_dir),
-            platform=platform,
-        )
-
-    journey = await crawler.crawl()
-
-    # Absorb cookies back to profile
-    if hasattr(crawler, 'cookie_jar'):
-        pm.absorb_cookie_jar(crawler.cookie_jar)
-
-    output_file = platform_dir / "journey.json"
-    journey.save(str(output_file))
-    pages = crawler.get_stats()["pages_captured"]
-    click.echo(f"  {platform.type}: {pages} pages -> {output_file}")
-    return pages
-
-
-def _run_platform(scrape_config, platform, platform_dir, engine="auto", browser_type="webkit"):
-    """Sync wrapper — single asyncio.run() for the entire platform crawl."""
-    return asyncio.run(_run_platform_async(scrape_config, platform, platform_dir, engine, browser_type))
 
 
 @click.group()
@@ -133,6 +53,7 @@ def crawl(config, output_dir, engine, browser_type):
         # Load configuration
         click.echo(f"Loading configuration from: {config}")
         scrape_config = ScrapeConfig.load(config)
+        scrape_config.output_dir = output_dir
         click.echo(f"Configuration loaded")
         click.echo(f"   Target: {scrape_config.target['name']}")
         click.echo(f"   Base URL: {scrape_config.target['base_url']}")
@@ -140,16 +61,18 @@ def crawl(config, output_dir, engine, browser_type):
         click.echo(f"   Seed URLs: {len(scrape_config.seed_urls)}")
         click.echo(f"   Max pages: {scrape_config.crawler.max_pages}")
 
-        # Run crawl for each platform using shared _run_platform()
-        click.echo(f"\nStarting multi-platform crawl...\n")
-        total_pages = 0
-        for platform in scrape_config.platforms:
-            platform_dir = Path(output_dir) / platform.type
-            total_pages += _run_platform(scrape_config, platform, platform_dir, engine=engine, browser_type=browser_type)
+        click.echo(f"\nStarting crawl via orchestrator...\n")
+        orchestrator = CrawlOrchestrator(
+            config=scrape_config,
+            browser_type=browser_type,
+            engine=engine,
+        )
+        result = asyncio.run(orchestrator.run_all())
+        total_screens = result.get("meta", {}).get("total_screens", 0)
 
         click.echo(f"\n{'='*60}")
         click.echo(f"All platforms complete!")
-        click.echo(f"Total pages captured: {total_pages}")
+        click.echo(f"Total pages captured: {total_screens}")
         click.echo(f"Output directory: {output_dir}")
         click.echo(f"{'='*60}\n")
 
@@ -403,18 +326,21 @@ def scrape(brand, platforms, output_dir, max_pages, appium_server, local, engine
         browser=browser_provider,
     )
 
-    # Run each platform through the same _run_platform() used by 'crawl'
-    click.echo(f"\nStarting crawl...\n")
-    for platform in scrape_config.platforms:
-        platform_dir = Path(output_dir) / platform.type
-        click.echo(f"{'─'*50}")
-        try:
-            total_pages += _run_platform(scrape_config, platform, platform_dir, engine=engine, browser_type=browser_type)
-        except Exception as e:
-            click.echo(f"  Error: {e}")
-            import traceback
-
-            traceback.print_exc()
+    # Run all platforms through orchestrator
+    click.echo(f"\nStarting crawl via orchestrator...\n")
+    scrape_config.output_dir = output_dir
+    orchestrator = CrawlOrchestrator(
+        config=scrape_config,
+        browser_type=browser_type,
+        engine=engine,
+    )
+    try:
+        result = asyncio.run(orchestrator.run_all())
+        total_pages = result.get("meta", {}).get("total_screens", 0)
+    except Exception as e:
+        click.echo(f"  Error: {e}")
+        import traceback
+        traceback.print_exc()
 
     click.echo(f"\n{'='*60}")
     click.echo(f"All platforms complete! Total pages: {total_pages}")
