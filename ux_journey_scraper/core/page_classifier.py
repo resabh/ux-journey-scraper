@@ -9,9 +9,10 @@ class PageClassifier:
     URL_RULES = [
         ("homepage", [r"^/$", r"^$"]),
         ("cart", [r"/cart", r"/bag", r"/basket"]),
-        ("checkout", [r"/checkout"]),
-        ("search", [r"/search", r"/s\?"]),
-        ("account", [r"/login", r"/signup", r"/sign-in", r"/register", r"/myaccount", r"/account"]),
+        ("checkout", [r"/checkout", r"/payment", r"/billing", r"/review.*order", r"/place.*order"]),
+        ("search", [r"/search", r"/s\?", r"[?&]q=", r"/browse\?query"]),
+        ("account", [r"/login", r"/signup", r"/sign-in", r"/register", r"/myaccount", r"/account",
+                      r"/profile", r"/dashboard", r"/orders", r"/wishlist"]),
         ("policy", [r"/privacy", r"/terms", r"/policy", r"/shipping.*policy", r"/return.*policy",
                      r"/refund", r"/cookie.*policy", r"/legal", r"/disclaimer"]),
         ("info", [r"/about", r"/contact", r"/faq", r"/help", r"/support", r"/store-locator", r"/stores"]),

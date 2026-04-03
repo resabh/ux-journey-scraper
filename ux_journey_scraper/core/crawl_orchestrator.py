@@ -172,6 +172,13 @@ class CrawlOrchestrator:
 
             try:
                 journey = await crawler.crawl()
+
+                # Save journey.json (consumers like ux_tester need this)
+                session_dir = output_dir / plan.session_id
+                session_dir.mkdir(parents=True, exist_ok=True)
+                journey_file = session_dir / "journey.json"
+                journey.save(str(journey_file))
+
                 screens = self._extract_screens_from_journey(journey)
                 all_screens.extend(screens)
                 logger.info(f"  → {len(screens)} screens captured")
@@ -286,7 +293,7 @@ class CrawlOrchestrator:
     def _save_checkpoint(
         self, path: Path, completed: set, screens: List, proxy_slot: int
     ):
-        """Save checkpoint for resume capability."""
+        """Save checkpoint for resume capability (atomic write)."""
         try:
             data = {
                 "completed_sessions": list(completed),
@@ -294,7 +301,9 @@ class CrawlOrchestrator:
                 "last_proxy_slot": proxy_slot,
                 "saved_at": datetime.utcnow().isoformat(),
             }
-            path.write_text(json.dumps(data, indent=2))
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(data, indent=2))
+            tmp_path.replace(path)  # Atomic on POSIX
         except Exception as e:
             logger.warning(f"Checkpoint save failed: {e}")
 

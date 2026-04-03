@@ -52,7 +52,8 @@ class TestProfileManager(unittest.TestCase):
         pm.merge_cookies("tasva.com", [{"name": "sess", "value": "x", "domain": ".tasva.com", "path": "/"}])
         jar = CookieJar()
         pm.seed_cookie_jar(jar, "tasva.com")
-        self.assertTrue(jar.has_cookies("google.com"))
+        # Only target domain cookies are seeded (no cross-site leakage)
+        self.assertFalse(jar.has_cookies("google.com"))
         self.assertTrue(jar.has_cookies("tasva.com"))
 
     def test_absorb_cookie_jar(self):

@@ -65,13 +65,16 @@ class ProfileManager:
             logger.warning(f"Profile load failed: {e}")
 
     def _save(self):
-        """Persist profile to disk with restricted permissions (owner-only)."""
+        """Persist profile to disk with restricted permissions (atomic write)."""
         self._profile_path.parent.mkdir(parents=True, exist_ok=True)
         self._saved_at = datetime.utcnow().isoformat()
         data = {"saved_at": self._saved_at, "domains": self._domains}
-        self._profile_path.write_text(json.dumps(data, indent=2, default=str))
-        # Restrict to owner-only (contains session tokens)
-        os.chmod(self._profile_path, 0o600)
+        # Atomic write: set permissions on tmp file BEFORE rename
+        # to avoid window where file is world-readable with session tokens
+        tmp_path = self._profile_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, default=str))
+        os.chmod(tmp_path, 0o600)
+        tmp_path.replace(self._profile_path)  # Atomic on POSIX
         logger.debug(f"Profile saved: {len(self._domains)} domains")
 
     def is_fresh(self) -> bool:
@@ -103,13 +106,18 @@ class ProfileManager:
         logger.debug(f"Profile merged: {len(cookies)} cookies for {domain}")
 
     def seed_cookie_jar(self, cookie_jar: CookieJar, target_domain: str) -> None:
-        """Seed a CookieJar with warm-up cookies and target domain cookies."""
+        """Seed a CookieJar with target domain cookies only.
+
+        Only injects cookies that match the target domain to prevent
+        cross-site cookie leakage (e.g. Google cookies into target site).
+        """
+        target_base = target_domain.replace("www.", "")
         seeded = 0
         for domain, cookies in self._domains.items():
-            if cookies:
+            if cookies and target_base in domain:
                 cookie_jar.update(domain, cookies)
                 seeded += len(cookies)
-        logger.info(f"Seeded CookieJar: {seeded} cookies from {len(self._domains)} domains")
+        logger.info(f"Seeded CookieJar: {seeded} cookies for {target_base}")
 
     def absorb_cookie_jar(self, cookie_jar: CookieJar) -> None:
         """Merge all cookies from a completed crawl back into the profile."""
@@ -135,12 +143,9 @@ class ProfileManager:
 
         logger.info("Starting profile warm-up...")
 
-        # Shuffle non-search sites for variety (keep Google first)
+        # Full shuffle — hardcoded order is a bot signature
         sites = list(self.WARMUP_SITES)
-        first_two = sites[:2]  # Google searches always first
-        rest = sites[2:]
-        random.shuffle(rest)
-        sites = first_two + rest
+        random.shuffle(sites)
 
         async with async_playwright() as p:
             # Use the requested browser engine
@@ -181,7 +186,7 @@ class ProfileManager:
             cookies = await context.cookies()
             domain_cookies: dict[str, list] = {}
             for cookie in cookies:
-                d = cookie.get("domain", "").lstrip(".")
+                d = cookie.get("domain", "").lstrip(".").removeprefix("www.")
                 if d not in domain_cookies:
                     domain_cookies[d] = []
                 domain_cookies[d].append(cookie)

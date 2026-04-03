@@ -55,12 +55,16 @@ class BehaviorSequencer:
         except Exception as e:
             logger.debug(f"Behavior scroll failed: {e}")
 
-        # 2. Move mouse to 3-5 random positions
+        # 2. Move mouse to 3-5 random positions (track position to avoid teleporting)
         num_moves = random.randint(3, 5)
+        cur_x, cur_y = vw / 2, vh / 2  # Start at center once
         for _ in range(num_moves):
             x, y = HumanBehaviour.random_viewport_position(vw, vh)
             try:
-                await HumanBehaviour.human_mouse_move(page, to_x=x, to_y=y)
+                await HumanBehaviour.human_mouse_move(
+                    page, to_x=x, to_y=y, from_x=cur_x, from_y=cur_y
+                )
+                cur_x, cur_y = x, y
             except Exception as e:
                 logger.debug(f"Behavior mouse move failed: {e}")
 
@@ -84,7 +88,10 @@ class BehaviorSequencer:
                     if box:
                         tx = box["x"] + box["width"] / 2 + random.uniform(-3, 3)
                         ty = box["y"] + box["height"] / 2 + random.uniform(-3, 3)
-                        await HumanBehaviour.human_mouse_move(page, to_x=tx, to_y=ty)
+                        await HumanBehaviour.human_mouse_move(
+                            page, to_x=tx, to_y=ty, from_x=cur_x, from_y=cur_y
+                        )
+                        cur_x, cur_y = tx, ty
                         await HumanBehaviour.human_delay(300, 800, reason="scroll_pause")
             except Exception as e:
                 logger.debug(f"Behavior hover failed: {e}")

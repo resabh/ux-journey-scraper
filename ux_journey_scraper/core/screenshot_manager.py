@@ -168,10 +168,11 @@ class ScreenshotManager:
                         )
 
             # Find text elements containing PII patterns
-            all_text_elements = await page.query_selector_all("*")
-            for elem in all_text_elements[
-                :100
-            ]:  # Limit to first 100 elements for performance
+            # Target leaf text nodes and form-adjacent elements rather than all 'a'
+            # to avoid scanning thousands of elements on large pages
+            pii_selectors = "p, span, label, td, th, li, dd, dt, h1, h2, h3, h4, h5, h6, div > :not(div):not(section):not(article):not(nav)"
+            all_text_elements = await page.query_selector_all(pii_selectors)
+            for elem in all_text_elements:
                 try:
                     text = await elem.inner_text()
 

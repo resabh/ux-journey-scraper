@@ -131,6 +131,7 @@ class CrawleeAdapter:
         )
         self.pages_captured = 0
         self.captured_urls = set()
+        self.consecutive_blocks = 0
 
     def _is_block_page(self, title: str, text_preview: str) -> bool:
         """Check if the current page is a block/CAPTCHA page."""
@@ -158,8 +159,11 @@ class CrawleeAdapter:
         }
         modifier = modifiers.get(page_type, 0.8)
         adjusted_ms = base_ms * modifier
-        t = random.betavariate(2, 5)
-        delay_ms = adjusted_ms * 0.5 + adjusted_ms * t
+        # Vary beta params slightly per call to avoid statistical fingerprint
+        alpha = random.uniform(1.8, 2.5)
+        beta = random.uniform(4.0, 5.5)
+        t = random.betavariate(alpha, beta)
+        delay_ms = adjusted_ms * t
         return delay_ms / 1000.0
 
     async def crawl(self) -> Journey:
@@ -264,7 +268,7 @@ class CrawleeAdapter:
                 try:
                     await page.context.add_cookies(cookies)
                 except Exception as e:
-                    logger.debug(f"Cookie injection failed: {e}")
+                    logger.warning(f"Cookie injection failed (appearing as new visitor): {e}")
             # Attach network listener for compliance data
             self.compliance_collector.attach(page)
 
@@ -277,7 +281,7 @@ class CrawleeAdapter:
                     })
                 """)
             except Exception as e:
-                logger.debug(f"Webdriver fix failed: {e}")
+                logger.warning(f"Webdriver fix failed (bot detection exposed): {e}")
 
         @crawler.router.default_handler
         async def handle_page(context: PlaywrightCrawlingContext) -> None:
@@ -289,34 +293,34 @@ class CrawleeAdapter:
             page_domain = urlparse(url).netloc.replace("www.", "")
             is_allowed = page_domain in self.allowed_domains
             if not is_allowed:
-                # Check if this is a redirect of a known domain (same brand, different TLD)
-                # e.g. bata.in → bata.com, sugar.in → sugarcosmetics.com
+                # First page redirect: validate brand similarity before trusting.
+                # Prevents attacker from hijacking crawler via open redirect.
                 if not self.captured_urls and self.pages_captured == 0:
-                    # First page — trust the redirect (crawlee followed it from our seed URL)
-                    logger.info(f"Redirect detected: {self.base_domain} → {page_domain}")
-                    self.allowed_domains.add(page_domain)
-                    is_allowed = True
+                    base_brand = self.base_domain.split(".")[0]
+                    page_brand = page_domain.split(".")[0]
+                    if base_brand in page_domain or page_brand in self.base_domain:
+                        logger.info(f"Redirect detected: {self.base_domain} → {page_domain}")
+                        self.allowed_domains.add(page_domain)
+                        is_allowed = True
+                    else:
+                        logger.warning(
+                            f"Redirect to unrelated domain blocked: "
+                            f"{self.base_domain} → {page_domain}"
+                        )
             if not is_allowed:
                 logger.debug(f"Skipping external: {url[:80]}")
                 return
 
-            # URL dedup
-            normalized = url.split("?")[0].split("#")[0].rstrip("/")
+            # URL dedup — preserve query params for pages where they matter
+            # (search results, product listings, product variants)
+            url_type = PageClassifier.classify_url(url)
+            if url_type in ("search", "plp", "pdp"):
+                normalized = url.split("#")[0].rstrip("/")  # Keep query params
+            else:
+                normalized = url.split("?")[0].split("#")[0].rstrip("/")
             if normalized in self.captured_urls:
                 logger.debug(f"Already captured: {url[:80]}")
                 return
-
-            # === ALWAYS ENQUEUE LINKS FIRST ===
-            # This must happen before any early returns (block/empty detection)
-            # so link discovery works even when capture is skipped.
-            # Use "all" strategy because crawlee's same-domain/same-hostname
-            # compare against the original request URL, not the current page URL.
-            # This breaks on redirects (e.g. bata.in → bata.com). Our handler
-            # already filters by allowed_domains so "all" is safe.
-            try:
-                await context.enqueue_links(strategy="all")
-            except Exception as e:
-                logger.debug(f"Link enqueue failed: {e}")
 
             # === READINESS (must run before content checks for JS-rendered SPAs) ===
             try:
@@ -333,12 +337,18 @@ class CrawleeAdapter:
             except Exception:
                 text_preview = ""
 
-            # Block page detection — skip capture but links already enqueued
+            # Block page detection — DON'T enqueue links from block pages (trap links)
             if AntiCrawlerDetector.is_block_page(title, text_preview):
-                logger.warning(f"Block page detected: {title[:50]} at {url[:60]}")
+                self.consecutive_blocks += 1
+                logger.warning(
+                    f"Block page detected ({self.consecutive_blocks}x): "
+                    f"{title[:50]} at {url[:60]}"
+                )
+                if self.consecutive_blocks >= 3:
+                    logger.error("Crawler blocked — 3 consecutive block pages, aborting")
                 return
 
-            # Empty page detection — skip capture but links already enqueued
+            # Empty page detection
             try:
                 html_content = await page.content()
             except Exception:
@@ -346,7 +356,25 @@ class CrawleeAdapter:
 
             if AntiCrawlerDetector.is_empty_page(html_content, text_preview):
                 logger.warning(f"Empty page detected: {url[:60]}")
+                # Still enqueue links from empty pages (SPAs may have nav links)
+                try:
+                    await context.enqueue_links(strategy="all")
+                except Exception as e:
+                    logger.debug(f"Link enqueue failed: {e}")
                 return
+
+            # Reset consecutive block counter on successful page
+            self.consecutive_blocks = 0
+
+            # Enqueue links from valid pages
+            # Use "all" strategy because crawlee's same-domain/same-hostname
+            # compare against the original request URL, not the current page URL.
+            # This breaks on redirects (e.g. bata.in → bata.com). Our handler
+            # already filters by allowed_domains so "all" is safe.
+            try:
+                await context.enqueue_links(strategy="all")
+            except Exception as e:
+                logger.debug(f"Link enqueue failed: {e}")
 
             self.pages_captured += 1
             self.captured_urls.add(normalized)

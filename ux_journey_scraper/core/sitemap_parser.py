@@ -126,6 +126,13 @@ class SitemapParser:
             return
 
         try:
+            # Strip DOCTYPE to prevent XXE (external entity injection).
+            # Sitemaps should never have DTDs — only malicious ones do.
+            if "<!DOCTYPE" in content or "<!ENTITY" in content:
+                logger.warning(f"Sitemap contains DOCTYPE/ENTITY — stripping for XXE safety")
+                import re as _re
+                content = _re.sub(r"<!DOCTYPE[^>]*>", "", content, flags=_re.IGNORECASE)
+                content = _re.sub(r"<!ENTITY[^>]*>", "", content, flags=_re.IGNORECASE)
             root = ElementTree.fromstring(content)
         except ElementTree.ParseError as e:
             logger.debug(f"Sitemap XML parse error: {e}")

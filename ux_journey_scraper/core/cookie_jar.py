@@ -115,10 +115,12 @@ class CookieJar:
             # Ensure parent directory exists
             self._persist_path.parent.mkdir(parents=True, exist_ok=True)
 
-            self._persist_path.write_text(
+            tmp_path = self._persist_path.with_suffix(".tmp")
+            tmp_path.write_text(
                 json.dumps(data, indent=2, default=str),
                 encoding="utf-8",
             )
+            tmp_path.replace(self._persist_path)  # Atomic on POSIX
             logger.debug(f"Saved cookies to {self._persist_path}")
 
         except Exception as e:
