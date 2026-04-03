@@ -243,14 +243,15 @@ class CrawlOrchestrator:
 
                 try:
                     journey = await crawler.crawl()
-                    screens = self._extract_screens_from_journey(journey)
-                    all_screens.extend(screens)
 
-                    # Save journey.json per platform (consumers need this)
+                    # Save journey.json first (consumers need this)
                     platform_dir.mkdir(parents=True, exist_ok=True)
                     journey_file = platform_dir / "journey.json"
                     journey.save(str(journey_file))
                     journeys[platform.type] = journey
+
+                    screens = self._extract_screens_from_journey(journey)
+                    all_screens.extend(screens)
                     pages = crawler.get_stats().get("pages_captured", len(screens))
                     logger.info(f"  → {pages} pages -> {journey_file}")
 
@@ -314,10 +315,9 @@ class CrawlOrchestrator:
                 "url": step.url,
                 "title": step.title,
                 "screenshot_path": step.screenshot_path,
-                "timestamp": step.timestamp.isoformat() if step.timestamp else None,
-                "page_type": step.page_type or "unknown",
-                "dom_snapshot": step.dom_snapshot,
-                "metadata": step.metadata or {},
+                "timestamp": step.timestamp if isinstance(step.timestamp, str) else (step.timestamp.isoformat() if step.timestamp else None),
+                "page_type": getattr(step, "page_type", None) or "unknown",
+                "page_data": step.page_data if hasattr(step, "page_data") else {},
             }
             screens.append(screen)
         return screens

@@ -99,6 +99,8 @@ class CrawleeAdapter:
 
         self.platform = platform or config.platforms[0]
         self.base_domain = urlparse(config.base_url).netloc.replace("www.", "")
+        # Track allowed domains — sites like bata.in → bata.com/in/ redirect
+        self.allowed_domains = {self.base_domain}
 
         # Detection avoidance components
         self.cookie_jar = cookie_jar or CookieJar()
@@ -223,7 +225,21 @@ class CrawleeAdapter:
         concurrency = ConcurrencySettings(
             min_concurrency=1,
             max_concurrency=1,
+            desired_concurrency=1,
         )
+
+        # Each crawl needs its own event manager + storage client to avoid
+        # stale global state that causes requests to never be processed
+        # on consecutive crawls (current_concurrency stays 0).
+        import uuid
+        from crawlee.configuration import Configuration
+        from crawlee.events import EventManager
+        from crawlee.storage_clients import MemoryStorageClient
+
+        storage_dir = f"./storage_{uuid.uuid4().hex[:8]}"
+        crawl_config = Configuration(storage_dir=storage_dir)
+        event_manager = EventManager()
+        storage_client = MemoryStorageClient()
 
         crawler = PlaywrightCrawler(
             max_requests_per_crawl=effective_max or None,  # 0/None = unlimited
@@ -233,6 +249,9 @@ class CrawleeAdapter:
             use_incognito_pages=True,
             request_handler_timeout=handler_timeout,
             concurrency_settings=concurrency,
+            configuration=crawl_config,
+            event_manager=event_manager,
+            storage_client=storage_client,
         )
 
         # Pre-navigation hook: inject cookies + fix webdriver
@@ -265,8 +284,19 @@ class CrawleeAdapter:
             page = context.page
             url = page.url
 
-            # Skip external pages
-            if self.base_domain not in urlparse(url).netloc:
+            # Skip external pages (but still enqueue same-domain links)
+            # Auto-add redirected domains (e.g. bata.in → bata.com)
+            page_domain = urlparse(url).netloc.replace("www.", "")
+            is_allowed = page_domain in self.allowed_domains
+            if not is_allowed:
+                # Check if this is a redirect of a known domain (same brand, different TLD)
+                # e.g. bata.in → bata.com, sugar.in → sugarcosmetics.com
+                if not self.captured_urls and self.pages_captured == 0:
+                    # First page — trust the redirect (crawlee followed it from our seed URL)
+                    logger.info(f"Redirect detected: {self.base_domain} → {page_domain}")
+                    self.allowed_domains.add(page_domain)
+                    is_allowed = True
+            if not is_allowed:
                 logger.debug(f"Skipping external: {url[:80]}")
                 return
 
@@ -276,8 +306,23 @@ class CrawleeAdapter:
                 logger.debug(f"Already captured: {url[:80]}")
                 return
 
+            # === ALWAYS ENQUEUE LINKS FIRST ===
+            # This must happen before any early returns (block/empty detection)
+            # so link discovery works even when capture is skipped.
+            # Use "all" strategy because crawlee's same-domain/same-hostname
+            # compare against the original request URL, not the current page URL.
+            # This breaks on redirects (e.g. bata.in → bata.com). Our handler
+            # already filters by allowed_domains so "all" is safe.
+            try:
+                await context.enqueue_links(strategy="all")
+            except Exception as e:
+                logger.debug(f"Link enqueue failed: {e}")
+
             # === READINESS (must run before content checks for JS-rendered SPAs) ===
-            await self.readiness.wait_until_ready(page)
+            try:
+                await self.readiness.wait_until_ready(page)
+            except Exception as e:
+                logger.warning(f"Page readiness wait failed: {e}")
 
             # Get page info for block/empty detection
             title = await page.title() or ""
@@ -288,13 +333,18 @@ class CrawleeAdapter:
             except Exception:
                 text_preview = ""
 
-            # Block page detection
+            # Block page detection — skip capture but links already enqueued
             if AntiCrawlerDetector.is_block_page(title, text_preview):
-                logger.warning(f"Block page detected: {title} at {url[:60]}")
+                logger.warning(f"Block page detected: {title[:50]} at {url[:60]}")
                 return
 
-            # Empty page detection
-            if AntiCrawlerDetector.is_empty_page(await page.content(), text_preview):
+            # Empty page detection — skip capture but links already enqueued
+            try:
+                html_content = await page.content()
+            except Exception:
+                html_content = ""
+
+            if AntiCrawlerDetector.is_empty_page(html_content, text_preview):
                 logger.warning(f"Empty page detected: {url[:60]}")
                 return
 
@@ -396,13 +446,7 @@ class CrawleeAdapter:
             except Exception as e:
                 logger.warning(f"Cookie harvest failed: {e}")
 
-            # 8. Enqueue internal links (crawlee handles dedup)
-            try:
-                await context.enqueue_links(strategy="same-domain")
-            except Exception as e:
-                logger.debug(f"Link enqueue failed: {e}")
-
-            # 9. Inter-page delay (human pacing)
+            # 8. Inter-page delay (human pacing)
             delay = self._calculate_page_delay(page_type)
             logger.debug(f"Inter-page delay: {delay:.1f}s ({page_type})")
             await asyncio.sleep(delay)
@@ -414,10 +458,10 @@ class CrawleeAdapter:
         self.journey.complete()
 
         # Clean up crawlee storage artifacts
-        storage_dir = Path("storage")
-        if storage_dir.exists():
-            shutil.rmtree(storage_dir, ignore_errors=True)
-            logger.debug("Cleaned up crawlee storage directory")
+        crawlee_storage = Path(storage_dir)
+        if crawlee_storage.exists():
+            shutil.rmtree(crawlee_storage, ignore_errors=True)
+            logger.debug(f"Cleaned up crawlee storage: {storage_dir}")
 
         logger.info(f"Crawl complete: {self.pages_captured} pages captured")
 
