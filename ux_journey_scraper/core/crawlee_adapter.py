@@ -272,16 +272,42 @@ class CrawleeAdapter:
             # Attach network listener for compliance data
             self.compliance_collector.attach(page)
 
-            # Fix navigator.webdriver
+            # Anti-detection patches via init script (runs before page JS)
+            vp = self.platform.viewport or {"width": 1920, "height": 1080}
             try:
                 await page.add_init_script("""
+                    // Fix navigator.webdriver (trivial bot signal)
                     Object.defineProperty(navigator, 'webdriver', {
                         get: () => false,
                         configurable: true
-                    })
+                    });
+
+                    // Match screen dimensions to viewport (headless mismatch detection)
+                    Object.defineProperty(window.screen, 'width', { get: () => """ + str(vp["width"]) + """ });
+                    Object.defineProperty(window.screen, 'height', { get: () => """ + str(vp["height"]) + """ });
+                    Object.defineProperty(window.screen, 'availWidth', { get: () => """ + str(vp["width"]) + """ });
+                    Object.defineProperty(window.screen, 'availHeight', { get: () => """ + str(vp["height"] - 50) + """ });
+
+                    // Block WebRTC IP leak (bypasses proxy, exposes real IP)
+                    if (window.RTCPeerConnection) {
+                        const OrigRTC = window.RTCPeerConnection;
+                        window.RTCPeerConnection = function(...args) {
+                            const pc = new OrigRTC(...args);
+                            const origCreate = pc.createDataChannel.bind(pc);
+                            pc.createDataChannel = function() { return origCreate(...arguments); };
+                            // Suppress ICE candidate events that leak local IPs
+                            pc.onicecandidate = null;
+                            Object.defineProperty(pc, 'onicecandidate', {
+                                set: () => {},
+                                get: () => null
+                            });
+                            return pc;
+                        };
+                        window.RTCPeerConnection.prototype = OrigRTC.prototype;
+                    }
                 """)
             except Exception as e:
-                logger.warning(f"Webdriver fix failed (bot detection exposed): {e}")
+                logger.warning(f"Anti-detection patches failed (bot fingerprint exposed): {e}")
 
         @crawler.router.default_handler
         async def handle_page(context: PlaywrightCrawlingContext) -> None:
