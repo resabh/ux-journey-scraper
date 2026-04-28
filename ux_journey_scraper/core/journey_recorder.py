@@ -4,6 +4,7 @@ Main journey recorder engine using Playwright.
 
 import asyncio
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,8 @@ from playwright.async_api import async_playwright
 from ux_journey_scraper.core.page_analyzer import PageAnalyzer
 from ux_journey_scraper.core.robots_checker import RobotsChecker
 from ux_journey_scraper.core.screenshot_manager import ScreenshotManager
+
+logger = logging.getLogger(__name__)
 
 
 class JourneyStep:
@@ -27,6 +30,15 @@ class JourneyStep:
         self.page_data = page_data
         self.ux_validation = ux_validation  # UX validation results
         self.timestamp = datetime.now().isoformat()
+
+    def load_html(self) -> str:
+        """Load HTML content — from file if externalized, inline otherwise."""
+        html_path = self.page_data.get("html_path")
+        if html_path:
+            p = Path(html_path)
+            if p.exists():
+                return p.read_text(encoding="utf-8")
+        return self.page_data.get("html", "")
 
     def to_dict(self):
         """Convert step to dictionary."""
@@ -56,12 +68,22 @@ class Journey:
         self.platform_type = platform_type
         self.user_agent = user_agent
         self.steps = []
+        self.errors = []
         self.start_time = datetime.now().isoformat()
         self.end_time = None
 
     def add_step(self, step):
         """Add a step to the journey."""
         self.steps.append(step)
+
+    def add_error(self, url, error, phase="unknown"):
+        """Record a non-fatal error that occurred during crawl."""
+        self.errors.append({
+            "url": url,
+            "error": str(error),
+            "phase": phase,
+            "timestamp": datetime.now().isoformat(),
+        })
 
     def complete(self):
         """Mark journey as complete."""
@@ -70,7 +92,7 @@ class Journey:
     def to_dict(self):
         """Convert journey to dictionary."""
         result = {
-            "schema_version": "2.1",
+            "schema_version": "2.2",
             "start_url": self.start_url,
             "viewport": {"width": self.viewport[0], "height": self.viewport[1]},
             "start_time": self.start_time,
@@ -78,6 +100,9 @@ class Journey:
             "total_steps": len(self.steps),
             "steps": [step.to_dict() for step in self.steps],
         }
+        if self.errors:
+            result["errors"] = self.errors
+            result["has_errors"] = True
         if self.platform_type:
             result["platform"] = {
                 "type": self.platform_type,
@@ -89,7 +114,7 @@ class Journey:
         """Save journey to JSON file."""
         with open(filepath, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
-        print(f"\n✓ Journey saved to: {filepath}")
+        logger.info(f"Journey saved to: {filepath}")
 
     @classmethod
     def load(cls, filepath):
@@ -106,6 +131,7 @@ class Journey:
         )
         journey.start_time = data["start_time"]
         journey.end_time = data["end_time"]
+        journey.errors = data.get("errors", [])
 
         for step_data in data["steps"]:
             step = JourneyStep(
@@ -170,24 +196,23 @@ class JourneyRecorder:
 
         if ux_validation_enabled:
             if not VALIDATORS_AVAILABLE:
-                print("⚠️  UX validation requested but validators not available")
-                print("   Install with: pip install beautifulsoup4")
+                logger.warning("UX validation requested but validators not available")
                 self.ux_validation_enabled = False
             elif not guidelines_path:
-                print("⚠️  UX validation enabled but guidelines_path not provided")
+                logger.warning("UX validation enabled but guidelines_path not provided")
                 self.ux_validation_enabled = False
             else:
                 try:
-                    print(f"📋 Loading Baymard guidelines from: {guidelines_path}")
+                    logger.info(f"Loading Baymard guidelines from: {guidelines_path}")
                     guideline_index = GuidelineIndex(guidelines_path)
                     self.ux_validator = BaymardValidator(guideline_index)
                     stats = guideline_index.get_statistics()
-                    print(f"   ✓ Loaded {stats['total_unique_guidelines']} guidelines")
-                    print(
-                        f"   ✓ Validation coverage: {self.ux_validator.get_validation_coverage()['coverage_percentage']}%"
+                    logger.info(f"Loaded {stats['total_unique_guidelines']} guidelines")
+                    logger.info(
+                        f"Validation coverage: {self.ux_validator.get_validation_coverage()['coverage_percentage']}%"
                     )
                 except Exception as e:
-                    print(f"⚠️  Failed to initialize UX validator: {e}")
+                    logger.warning(f"Failed to initialize UX validator: {e}")
                     self.ux_validation_enabled = False
 
         self.journey = None
@@ -210,11 +235,10 @@ class JourneyRecorder:
                     "Cannot proceed: robots.txt disallows and user declined."
                 )
 
-        print(f"\n🎬 Starting journey recording...")
-        print(f"📍 Start URL: {self.start_url}")
-        print(f"📐 Viewport: {self.viewport[0]}x{self.viewport[1]}")
-        print(f"🔒 PII Blur: {'Enabled' if self.blur_pii else 'Disabled'}")
-        print(f"🤖 robots.txt: {'Enabled' if self.respect_robots else 'Disabled'}")
+        logger.info(f"Starting journey recording: {self.start_url}")
+        logger.info(f"Viewport: {self.viewport[0]}x{self.viewport[1]}")
+        logger.info(f"PII Blur: {'Enabled' if self.blur_pii else 'Disabled'}")
+        logger.info(f"robots.txt: {'Enabled' if self.respect_robots else 'Disabled'}")
 
         self.journey = Journey(self.start_url, self.viewport,
                                platform_type=getattr(self, 'platform_type', None),
@@ -229,7 +253,7 @@ class JourneyRecorder:
             page = await context.new_page()
 
             # Go to start URL
-            print(f"\n➜ Navigating to start URL...")
+            logger.info("Navigating to start URL...")
             await page.goto(self.start_url)
             await page.wait_for_load_state("networkidle")
 
@@ -238,14 +262,7 @@ class JourneyRecorder:
 
             if not self.headless:
                 # Interactive mode: wait for user navigation
-                print(f"\n📌 Recording Mode Active")
-                print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                print(f"")
-                print(f"  🖱️  Navigate through the website as a user would")
-                print(f"  📸 Each page navigation will be automatically recorded")
-                print(f"  🛑 Press Ctrl+C to stop recording")
-                print(f"")
-                print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                logger.info("Recording Mode Active — navigate the site, Ctrl+C to stop")
 
                 # Listen for navigation events
                 previous_url = page.url
@@ -262,15 +279,14 @@ class JourneyRecorder:
                             previous_url = current_url
 
                 except KeyboardInterrupt:
-                    print(f"\n\n🛑 Stopping recording...")
+                    logger.info("Stopping recording...")
 
             await browser.close()
 
         # Complete journey
         self.journey.complete()
 
-        print(f"\n✅ Journey recording complete!")
-        print(f"📊 Total steps recorded: {len(self.journey.steps)}")
+        logger.info(f"Journey recording complete: {len(self.journey.steps)} steps")
 
         return self.journey
 
@@ -278,23 +294,23 @@ class JourneyRecorder:
         """Record a single journey step."""
         self.current_step += 1
 
-        print(f"\n📸 Recording Step {self.current_step}...")
+        logger.info(f"Recording Step {self.current_step}...")
 
         # Capture screenshot
         screenshot_path = await self.screenshot_manager.capture_screenshot(
             page, self.current_step
         )
-        print(f"   ✓ Screenshot: {screenshot_path}")
+        logger.debug(f"Screenshot: {screenshot_path}")
 
         # Analyze page
         page_data = await self.page_analyzer.analyze_page(page)
-        print(f"   ✓ Page analyzed: {page.url}")
+        logger.debug(f"Page analyzed: {page.url}")
 
         # Run UX validation if enabled
         ux_validation = None
         if self.ux_validation_enabled and self.ux_validator:
             try:
-                print(f"   🔍 Running UX validation...")
+                logger.debug("Running UX validation...")
                 ux_validation = self.ux_validator.validate_page(
                     url=page.url,
                     html=page_data["html"],
@@ -303,23 +319,21 @@ class JourneyRecorder:
                     page_data=page_data,
                 )
 
-                # Print validation summary
                 score = ux_validation["compliance_score"]
                 violations_count = len(ux_validation["violations"])
                 warnings_count = len(ux_validation["warnings"])
 
-                score_emoji = "🟢" if score >= 80 else "🟡" if score >= 60 else "🔴"
-                print(
-                    f"   {score_emoji} UX Compliance: {score}% ({ux_validation['page_type']})"
+                logger.info(
+                    f"UX Compliance: {score}% ({ux_validation['page_type']})"
                 )
 
                 if violations_count > 0:
-                    print(f"   ⚠️  {violations_count} violation(s) found")
+                    logger.info(f"{violations_count} violation(s) found")
                 if warnings_count > 0:
-                    print(f"   ℹ️  {warnings_count} warning(s)")
+                    logger.info(f"{warnings_count} warning(s)")
 
             except Exception as e:
-                print(f"   ⚠️  UX validation failed: {e}")
+                logger.warning(f"UX validation failed: {e}")
 
         # Create step
         step = JourneyStep(
@@ -334,7 +348,7 @@ class JourneyRecorder:
         # Add to journey
         self.journey.add_step(step)
 
-        print(f"   ✓ Step {self.current_step} recorded: {step.title}")
+        logger.info(f"Step {self.current_step} recorded: {step.title}")
 
     async def record_automated(self, urls):
         """
@@ -346,8 +360,7 @@ class JourneyRecorder:
         Returns:
             Journey: Recorded journey object
         """
-        print(f"\n🎬 Starting automated journey recording...")
-        print(f"📋 URLs to record: {len(urls)}")
+        logger.info(f"Starting automated journey recording: {len(urls)} URLs")
 
         self.journey = Journey(urls[0], self.viewport,
                                platform_type=getattr(self, 'platform_type', None),
@@ -367,10 +380,10 @@ class JourneyRecorder:
                         url, interactive=False  # Non-interactive for automated
                     )
                     if not can_proceed:
-                        print(f"⚠️  Skipping {url} (robots.txt)")
+                        logger.warning(f"Skipping {url} (robots.txt)")
                         continue
 
-                print(f"\n➜ [{i}/{len(urls)}] Navigating to: {url}")
+                logger.info(f"[{i}/{len(urls)}] Navigating to: {url}")
 
                 try:
                     await page.goto(url, timeout=30000)
@@ -383,14 +396,13 @@ class JourneyRecorder:
                     await asyncio.sleep(2)
 
                 except Exception as e:
-                    print(f"   ✗ Error loading {url}: {e}")
+                    logger.warning(f"Error loading {url}: {e}")
                     continue
 
             await browser.close()
 
         self.journey.complete()
 
-        print(f"\n✅ Automated journey recording complete!")
-        print(f"📊 Total steps recorded: {len(self.journey.steps)}")
+        logger.info(f"Automated journey recording complete: {len(self.journey.steps)} steps")
 
         return self.journey

@@ -138,6 +138,10 @@ class ProfileManager:
         accumulate real cookies and build browsing history that anti-bot
         systems expect from genuine users.
         """
+        valid_browsers = ("webkit", "chromium", "firefox")
+        if browser_type not in valid_browsers:
+            raise ValueError(f"Invalid browser_type: {browser_type!r}. Must be one of {valid_browsers}")
+
         from playwright.async_api import async_playwright
         from ux_journey_scraper.core.human_behaviour import HumanBehaviour
 

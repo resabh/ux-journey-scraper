@@ -23,9 +23,9 @@ class BehaviorSequencer:
         "search": (15, 35),
         "cart": (20, 45),
         "checkout": (30, 60),
-        "policy": (10, 25),
-        "info": (10, 25),
-        "content": (20, 50),
+        "policy": (3, 8),
+        "info": (3, 8),
+        "content": (8, 20),
         "other": (15, 35),
     }
 

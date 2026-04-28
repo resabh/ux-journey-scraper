@@ -3,10 +3,13 @@ Screenshot manager with PII blur capabilities.
 """
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
+
+logger = logging.getLogger(__name__)
 
 
 class ScreenshotManager:
@@ -131,7 +134,7 @@ class ScreenshotManager:
             img.save(screenshot_path)
 
         except Exception as e:
-            print(f"Warning: Failed to blur PII in screenshot: {e}")
+            logger.warning(f"Failed to blur PII in screenshot: {e}")
 
     async def _detect_pii_regions(self, page):
         """
@@ -193,11 +196,11 @@ class ScreenshotManager:
                                     int(bbox["height"]),
                                 )
                             )
-                except:
+                except Exception:
                     continue
 
         except Exception as e:
-            print(f"Warning: PII detection failed: {e}")
+            logger.warning(f"PII detection failed: {e}")
 
         return regions
 

@@ -373,7 +373,8 @@ def warm_up(browser_type):
         click.echo(f"Cookies: {len(pm.get_cookies())} total")
         click.echo("Use this command to refresh if needed.\n")
 
-    click.echo("Visiting mainstream sites to build browsing persona...")
+    click.echo(f"Visiting {len(pm.WARMUP_SITES)} mainstream sites to build browsing persona...")
+    click.echo("This takes 30-90 seconds (simulating real browsing).\n")
     try:
         asyncio.run(pm.warm_up(browser_type=browser_type))
         click.echo(f"\nWarm-up complete! Profile saved.")

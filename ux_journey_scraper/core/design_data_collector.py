@@ -190,28 +190,28 @@ class DesignDataCollector:
         try:
             result["css_variables"] = await page.evaluate(self.CSS_VARS_JS)
         except Exception as e:
-            logger.debug(f"Failed to get CSS variables: {e}")
+            logger.warning(f"Failed to get CSS variables: {e}")
             result["css_variables"] = {}
 
         # Computed styles for visible elements (deduped, up to 200)
         try:
             result["all_styles"] = await page.evaluate(self.ALL_STYLES_JS)
         except Exception as e:
-            logger.debug(f"Failed to get computed styles: {e}")
+            logger.warning(f"Failed to get computed styles: {e}")
             result["all_styles"] = []
 
         # Semantic component tree
         try:
             result["component_tree"] = await page.evaluate(self.COMPONENT_TREE_JS)
         except Exception as e:
-            logger.debug(f"Failed to get component tree: {e}")
+            logger.warning(f"Failed to get component tree: {e}")
             result["component_tree"] = []
 
         # Asset URLs (images, stylesheets, fonts)
         try:
             result["asset_urls"] = await page.evaluate(self.ASSET_URLS_JS)
         except Exception as e:
-            logger.debug(f"Failed to get asset URLs: {e}")
+            logger.warning(f"Failed to get asset URLs: {e}")
             result["asset_urls"] = {"images": [], "stylesheets": [], "fonts": []}
 
         return result

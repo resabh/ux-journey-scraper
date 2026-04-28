@@ -11,6 +11,7 @@ journey recording) runs on top of crawlee's page loading.
 import asyncio
 import logging
 import random
+import signal
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,7 +32,7 @@ from ux_journey_scraper.core.sitemap_parser import SitemapParser
 
 from ux_journey_scraper.core.design_data_collector import DesignDataCollector
 from ux_journey_scraper.core.page_classifier import PageClassifier
-from ux_journey_scraper.core.anti_crawler_detector import AntiCrawlerDetector
+from ux_journey_scraper.core.anti_crawler_detector import AntiCrawlerDetector, BLOCK_SIGNATURES
 from ux_journey_scraper.core.page_selector import PageSelector
 
 try:
@@ -50,20 +51,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Block page signatures
-BLOCK_SIGNATURES = [
-    "access denied",
-    "access is temporarily restricted",
-    "403 error",
-    "403 forbidden",
-    "request blocked",
-    "captcha",
-    "robot",
-    "unusual activity",
-    "verify you are human",
-    "just a moment",
-    "security measure",
-]
+VALID_BROWSER_TYPES = ("webkit", "chromium", "firefox")
 
 
 def is_crawlee_available() -> bool:
@@ -92,6 +80,8 @@ class CrawleeAdapter:
                 "crawlee is not installed. Install with: pip install 'crawlee[playwright]'"
             )
 
+        if browser_type not in VALID_BROWSER_TYPES:
+            raise ValueError(f"Invalid browser_type: {browser_type!r}. Must be one of {VALID_BROWSER_TYPES}")
         self.browser_type = browser_type
         self.config = config
         self.output_dir = Path(output_dir)
@@ -120,12 +110,13 @@ class CrawleeAdapter:
         self.design_collector = DesignDataCollector()
 
         # Journey state
+        vp_width = self.platform.viewport.get("width", 1920)
+        vp_height = self.platform.viewport.get("height", 1080)
+        if not isinstance(vp_width, int) or not isinstance(vp_height, int) or vp_width <= 0 or vp_height <= 0:
+            raise ValueError(f"Invalid viewport dimensions: {vp_width}x{vp_height} — must be positive integers")
         self.journey = Journey(
             start_url=config.base_url,
-            viewport=(
-                self.platform.viewport.get("width", 1920),
-                self.platform.viewport.get("height", 1080),
-            ),
+            viewport=(vp_width, vp_height),
             platform_type=self.platform.type,
             user_agent=self.platform.user_agent,
         )
@@ -420,51 +411,81 @@ class CrawleeAdapter:
                 await self.behavior.run(page, page_type=page_type)
             except Exception as e:
                 logger.warning(f"Behavior sequence failed: {e}")
+                self.journey.add_error(url, e, phase="behavior")
 
             # === ANALYSIS LAYER ===
 
-            # 1. Screenshot (page scrolled to top by behavior sequencer)
+            # 1. Screenshot with retry (page scrolled to top by behavior sequencer)
             screenshot_path = None
-            try:
-                screenshot_path = await self.screenshot_manager.capture_screenshot(
-                    page, step_num
-                )
-            except Exception as e:
-                logger.warning(f"Screenshot failed: {e}")
+            for _attempt in range(3):
+                try:
+                    screenshot_path = await self.screenshot_manager.capture_screenshot(
+                        page, step_num
+                    )
+                    break
+                except Exception as e:
+                    if _attempt == 2:
+                        logger.warning(f"Screenshot failed after 3 attempts: {e}")
+                        self.journey.add_error(url, e, phase="screenshot")
+                    else:
+                        logger.debug(f"Screenshot attempt {_attempt + 1} failed, retrying: {e}")
+                        await asyncio.sleep(0.5)
 
-            # 2. Page analysis (forms, links, buttons, CTAs, navigation)
+            # 2. Parallel data collection (page analysis + compliance + design)
             page_data = {}
-            try:
-                page_data = await self.page_analyzer.analyze_page(page)
-            except Exception as e:
-                logger.warning(f"Page analysis failed: {e}")
-                page_data = {"url": url, "title": title}
 
-            # Classify page type
+            async def _analyze():
+                try:
+                    return await self.page_analyzer.analyze_page(page)
+                except Exception as e:
+                    logger.warning(f"Page analysis failed: {e}")
+                    self.journey.add_error(url, e, phase="page_analysis")
+                    return {"url": url, "title": title}
+
+            async def _compliance():
+                try:
+                    return await self.compliance_collector.collect(
+                        page, context.page.context
+                    )
+                except Exception as e:
+                    logger.warning(f"Compliance data collection failed: {e}")
+                    self.journey.add_error(url, e, phase="compliance_collection")
+                    return {}
+
+            async def _design():
+                try:
+                    return await self.design_collector.collect(page)
+                except Exception as e:
+                    logger.warning(f"Design data collection failed: {e}")
+                    self.journey.add_error(url, e, phase="design_collection")
+                    return {}
+
+            analysis_result, compliance_data, design_data = await asyncio.gather(
+                _analyze(), _compliance(), _design()
+            )
+
+            page_data = analysis_result
             page_data["page_type"] = PageClassifier.classify_url(url)
 
-            # 3. Compliance data (cookies, localStorage, network, tab order)
-            try:
-                compliance_data = await self.compliance_collector.collect(
-                    page, context.page.context
-                )
-                page_data.update(compliance_data)
-            except Exception as e:
-                logger.warning(f"Compliance data collection failed: {e}")
+            # Save HTML to file instead of inline (prevents OOM on large sites)
+            if page_data.get("html"):
+                html_dir = self.output_dir / "html"
+                html_dir.mkdir(exist_ok=True)
+                html_file = html_dir / f"step-{step_num}.html"
+                html_file.write_text(page_data["html"], encoding="utf-8")
+                page_data["html_path"] = str(html_file)
+                del page_data["html"]
+            page_data.update(compliance_data)
 
-            # 3.5 Design system data (for DS builder)
-            try:
-                design_data = await self.design_collector.collect(page)
-                page_data["css_variables"] = design_data.get("css_variables", {})
-                page_data["component_tree"] = design_data.get("component_tree", [])
-                page_data["asset_urls"] = design_data.get("asset_urls", {})
-                if isinstance(page_data.get("computed_styles"), list):
-                    page_data["computed_styles"] = {"text_elements": page_data["computed_styles"]}
-                elif not isinstance(page_data.get("computed_styles"), dict):
-                    page_data["computed_styles"] = {}
-                page_data["computed_styles"]["all_elements"] = design_data.get("all_styles", [])
-            except Exception as e:
-                logger.warning(f"Design data collection failed: {e}")
+            # Merge design data
+            page_data["css_variables"] = design_data.get("css_variables", {})
+            page_data["component_tree"] = design_data.get("component_tree", [])
+            page_data["asset_urls"] = design_data.get("asset_urls", {})
+            if isinstance(page_data.get("computed_styles"), list):
+                page_data["computed_styles"] = {"text_elements": page_data["computed_styles"]}
+            elif not isinstance(page_data.get("computed_styles"), dict):
+                page_data["computed_styles"] = {}
+            page_data["computed_styles"]["all_elements"] = design_data.get("all_styles", [])
 
             # 4. Framework detection
             if self.cdp_detector:
@@ -505,8 +526,51 @@ class CrawleeAdapter:
             logger.debug(f"Inter-page delay: {delay:.1f}s ({page_type})")
             await asyncio.sleep(delay)
 
+        # Graceful shutdown: save journey on SIGINT/SIGTERM
+        interrupted = False
+        loop = asyncio.get_running_loop()
+        original_handlers = {}
+
+        def _shutdown_handler(sig, _frame=None):
+            nonlocal interrupted
+            if interrupted:
+                return  # Already handling
+            interrupted = True
+            logger.warning(f"Received {signal.Signals(sig).name} — saving journey before exit")
+            try:
+                self.journey.add_error(self.config.base_url, "Crawl interrupted by user", phase="shutdown")
+                self.journey.complete()
+                journey_file = self.output_dir / "journey.json"
+                self.journey.save(str(journey_file))
+                logger.info(f"Interrupted journey saved: {self.pages_captured} pages to {journey_file}")
+            except Exception as e:
+                logger.error(f"Failed to save interrupted journey: {e}")
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            original_handlers[sig] = signal.getsignal(sig)
+            try:
+                loop.add_signal_handler(sig, _shutdown_handler, sig)
+            except (NotImplementedError, RuntimeError):
+                # Windows or nested event loop — fall back to signal.signal
+                signal.signal(sig, _shutdown_handler)
+
         # Run the crawl with all seed URLs (sitemap + base URL)
-        await crawler.run(seed_urls)
+        try:
+            await crawler.run(seed_urls)
+        except (KeyboardInterrupt, SystemExit):
+            if not interrupted:
+                _shutdown_handler(signal.SIGINT)
+        finally:
+            # Restore original signal handlers
+            for sig, handler in original_handlers.items():
+                try:
+                    loop.remove_signal_handler(sig)
+                except (NotImplementedError, RuntimeError):
+                    pass
+                signal.signal(sig, handler or signal.SIG_DFL)
+
+        if interrupted:
+            return self.journey
 
         # Complete journey
         self.journey.complete()
@@ -527,4 +591,7 @@ class CrawleeAdapter:
             "pages_captured": self.pages_captured,
             "engine": "crawlee",
             "captured_urls": len(self.captured_urls),
+            "consecutive_blocks": self.consecutive_blocks,
+            "allowed_domains": list(self.allowed_domains),
+            "errors": len(self.journey.errors) if self.journey else 0,
         }

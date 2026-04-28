@@ -52,7 +52,7 @@ class ComplianceDataCollector:
         try:
             result["cookies"] = await context.cookies()
         except Exception as e:
-            logger.debug(f"Failed to get cookies: {e}")
+            logger.warning(f"Failed to get cookies: {e}")
             result["cookies"] = []
 
         # localStorage
@@ -61,28 +61,28 @@ class ComplianceDataCollector:
                 "() => { try { return Object.entries(localStorage); } catch(e) { return []; } }"
             )
         except Exception as e:
-            logger.debug(f"Failed to get localStorage: {e}")
+            logger.warning(f"Failed to get localStorage: {e}")
             result["local_storage"] = []
 
         # Computed styles (for color contrast checks)
         try:
             result["computed_styles"] = await self._get_text_styles(page)
         except Exception as e:
-            logger.debug(f"Failed to get computed styles: {e}")
+            logger.warning(f"Failed to get computed styles: {e}")
             result["computed_styles"] = []
 
         # Tab order (for keyboard navigation checks)
         try:
             result["tab_order"] = await self._get_tab_order(page)
         except Exception as e:
-            logger.debug(f"Failed to get tab order: {e}")
+            logger.warning(f"Failed to get tab order: {e}")
             result["tab_order"] = []
 
         # Focus styles (for focus visible checks)
         try:
             result["focus_styles"] = await self._get_focus_styles(page)
         except Exception as e:
-            logger.debug(f"Failed to get focus styles: {e}")
+            logger.warning(f"Failed to get focus styles: {e}")
             result["focus_styles"] = []
 
         return result
