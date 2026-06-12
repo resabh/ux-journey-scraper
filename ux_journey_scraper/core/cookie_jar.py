@@ -32,6 +32,7 @@ class CookieJar:
                          If None, cookies are only kept in memory.
         """
         self._cookies: Dict[str, List[dict]] = {}
+        self._local_storage: Dict[str, Dict[str, str]] = {}
         self._persist_path = persist_path  # Optional: save to disk for resume
 
     def update(self, domain: str, cookies: List[dict]):
@@ -89,6 +90,15 @@ class CookieJar:
 
         if self._persist_path:
             self._save_to_disk()
+
+    def set_local_storage(self, domain: str, entries: Dict[str, str]):
+        """Store localStorage entries for a domain."""
+        self._local_storage[domain] = entries
+        logger.debug(f"CookieJar localStorage set for {domain}: {len(entries)} entries")
+
+    def get_local_storage(self, domain: str) -> Dict[str, str]:
+        """Get localStorage entries for a domain."""
+        return self._local_storage.get(domain, {})
 
     def get_all_domains(self) -> List[str]:
         """

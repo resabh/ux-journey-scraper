@@ -35,3 +35,10 @@ reports/
 .DS_Store
 Thumbs.db
 storage/
+
+# Local-only Claude session instructions (never commit)
+CLAUDE.local.md
+
+# Crawl output corpora (never commit scraped site data)
+e2e_results/
+journey_output/
