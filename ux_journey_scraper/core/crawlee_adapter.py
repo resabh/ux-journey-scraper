@@ -9,6 +9,7 @@ journey recording) runs on top of crawlee's page loading.
 """
 
 import asyncio
+import json
 import logging
 import random
 import signal
@@ -52,6 +53,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 VALID_BROWSER_TYPES = ("webkit", "chromium", "firefox")
+
+# Plain-file URLs that are not journeys (e.g. boAt's /agents.md was captured
+# as a journey step in corpus v1). Never capture or follow these.
+SKIP_URL_EXTENSIONS = (
+    ".md", ".txt", ".xml", ".json", ".csv", ".pdf", ".zip", ".gz",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
+    ".css", ".js", ".mjs", ".map", ".mp4", ".webm", ".mp3",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+)
 
 
 def is_crawlee_available() -> bool:
@@ -236,6 +246,44 @@ class CrawleeAdapter:
         event_manager = EventManager()
         storage_client = MemoryStorageClient()
 
+        # Apply the platform viewport/UA/locale to the actual browser context.
+        # Without this, crawlee's default fingerprint picks its own (desktop)
+        # screen and "mobile" crawls render desktop layouts while journey.json
+        # claims a mobile viewport (corpus v1 defect #5). browserforge merges
+        # an explicit viewport OVER the fingerprint's, so this wins.
+        context_options = {"viewport": dict(viewport)}
+        if self.platform.user_agent:
+            context_options["user_agent"] = self.platform.user_agent
+        if getattr(self.platform, "locale", None):
+            context_options["locale"] = self.platform.locale
+        if getattr(self.platform, "timezone_id", None):
+            context_options["timezone_id"] = self.platform.timezone_id
+
+        # Constrain the fingerprint to the platform's device class and screen
+        # so headers/screen stay consistent with the forced viewport.
+        fingerprint_generator = "default"
+        try:
+            from crawlee.fingerprint_suite import (
+                DefaultFingerprintGenerator,
+                HeaderGeneratorOptions,
+                ScreenOptions,
+            )
+
+            is_mobile = self.platform.type in ("web_mobile", "web_tablet")
+            fingerprint_generator = DefaultFingerprintGenerator(
+                header_options=HeaderGeneratorOptions(
+                    devices=["mobile" if is_mobile else "desktop"],
+                ),
+                # Loose bounds — browserforge needs a real fingerprint from its
+                # dataset; exact-match constraints can be unsatisfiable.
+                screen_options=ScreenOptions(
+                    min_width=max(viewport["width"] - 100, 0),
+                    max_width=viewport["width"] + 200,
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Fingerprint constraints unavailable, using default: {e}")
+
         crawler = PlaywrightCrawler(
             max_requests_per_crawl=effective_max or None,  # 0/None = unlimited
             headless=self.config.crawler.headless,
@@ -247,6 +295,8 @@ class CrawleeAdapter:
             configuration=crawl_config,
             event_manager=event_manager,
             storage_client=storage_client,
+            browser_new_context_options=context_options,
+            fingerprint_generator=fingerprint_generator,
         )
 
         # Pre-navigation hook: inject cookies + fix webdriver
@@ -260,6 +310,17 @@ class CrawleeAdapter:
                     await page.context.add_cookies(cookies)
                 except Exception as e:
                     logger.warning(f"Cookie injection failed (appearing as new visitor): {e}")
+            # Inject localStorage from profile (anti-bot systems check for GA, segment, etc.)
+            ls_entries = self.cookie_jar.get_local_storage(self.base_domain)
+            if ls_entries:
+                try:
+                    ls_json = json.dumps(ls_entries)
+                    await page.add_init_script(
+                        f"try {{ const _ls = {ls_json}; for (const [k, v] of Object.entries(_ls)) {{ localStorage.setItem(k, v); }} }} catch(e) {{}}"
+                    )
+                except Exception as e:
+                    logger.debug(f"localStorage injection failed: {e}")
+
             # Attach network listener for compliance data
             self.compliance_collector.attach(page)
 
@@ -326,6 +387,12 @@ class CrawleeAdapter:
                         )
             if not is_allowed:
                 logger.debug(f"Skipping external: {url[:80]}")
+                return
+
+            # Skip plain files (markdown, feeds, assets) — not journeys
+            url_path = urlparse(url).path.lower()
+            if url_path.endswith(SKIP_URL_EXTENSIONS):
+                logger.debug(f"Skipping non-page file: {url[:80]}")
                 return
 
             # URL dedup — preserve query params for pages where they matter
@@ -466,6 +533,16 @@ class CrawleeAdapter:
 
             page_data = analysis_result
             page_data["page_type"] = PageClassifier.classify_url(url)
+
+            # Record actual render metrics so consumers/CI can assert that the
+            # screenshot matches the declared viewport (corpus v1 defect #5)
+            try:
+                page_data["device_pixel_ratio"] = await page.evaluate(
+                    "window.devicePixelRatio"
+                )
+                page_data["rendered_viewport"] = page.viewport_size
+            except Exception:
+                pass
 
             # Save HTML to file instead of inline (prevents OOM on large sites)
             if page_data.get("html"):

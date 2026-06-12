@@ -21,6 +21,9 @@ from urllib.parse import urlparse
 from ..config.scrape_config import ScrapeConfig
 from .autonomous_crawler import AutonomousCrawler
 from .cookie_jar import CookieJar
+from .coverage_reporter import CoverageReporter
+from .flow_runner import FlowRunner
+from .page_classifier import PageClassifier
 from .profile_manager import ProfileManager
 from .proxy_rotator import ProxyRotator
 from .session_planner import SessionPlanner, VisitPlan
@@ -76,7 +79,13 @@ class CrawlOrchestrator:
         if self.auto_warmup and self.profile_manager.is_fresh():
             logger.info("Profile is fresh/stale — auto warming up...")
             try:
-                await self.profile_manager.warm_up(browser_type=self.browser_type)
+                # Use first platform's UA for warm-up to avoid cookie/UA mismatch
+                warmup_ua = None
+                if self.config.platforms:
+                    warmup_ua = self.config.platforms[0].user_agent
+                await self.profile_manager.warm_up(
+                    browser_type=self.browser_type, user_agent=warmup_ua
+                )
                 logger.info(f"Warm-up complete: {len(self.profile_manager.get_cookies())} cookies")
             except Exception as e:
                 logger.warning(f"Warm-up failed (continuing without): {e}")
@@ -201,11 +210,21 @@ class CrawlOrchestrator:
                 # Extended cooldown after failure
                 await asyncio.sleep(self.config.session_strategy.max_cooldown_sec * 2)
 
+        # Directed flows: actively complete add-to-cart → cart → checkout-start,
+        # search → results, login — journeys link-following never reaches.
+        await self._run_directed_flows(
+            output_dir, cookie_jar, completed_session_ids, checkpoint_path, all_screens
+        )
+
         # Absorb crawl cookies back into profile
         self.profile_manager.absorb_cookie_jar(cookie_jar)
 
         # Build final context
         context = self._build_context(all_screens, run_id, output_dir)
+
+        # Journey coverage report (found/missed is THE progress metric)
+        context["coverage"] = self._emit_coverage(output_dir)
+
         logger.info(f"Crawl complete: {len(all_screens)} total screens")
         return context
 
@@ -265,12 +284,103 @@ class CrawlOrchestrator:
                 except Exception as e:
                     logger.error(f"Crawler failed: {e}", exc_info=True)
 
+        await self._run_directed_flows(output_dir, cookie_jar, set(), None, all_screens)
+
         self.profile_manager.absorb_cookie_jar(cookie_jar)
 
         context = self._build_context(all_screens, run_id, output_dir)
         context["journeys"] = {k: v for k, v in journeys.items()}
+        context["coverage"] = self._emit_coverage(output_dir)
         logger.info(f"Crawl complete: {len(all_screens)} total screens")
         return context
+
+    async def _run_directed_flows(
+        self, output_dir: Path, cookie_jar, completed_session_ids, checkpoint_path, all_screens
+    ):
+        """Run FlowRunner per platform after the link-following sessions.
+
+        Captures the journeys a crawl must COMPLETE rather than stumble into:
+        add-to-cart → cart-with-items → checkout-start, search → results,
+        login/account, and configured site-specific journeys.
+        """
+        coverage_cfg = getattr(self.config, "coverage", None)
+        if not coverage_cfg or not coverage_cfg.enabled or not coverage_cfg.run_flows:
+            return
+
+        for platform in self.config.platforms:
+            if not platform.is_web:
+                continue
+            session_id = f"flows_{platform.type}"
+            if session_id in completed_session_ids:
+                logger.info(f"Skipping completed flows session: {session_id}")
+                continue
+
+            flow_dir = output_dir / session_id
+            pdp_urls = self._discover_urls(output_dir, "pdp", platform.type)
+            logger.info(
+                f"Directed flows on {platform.type}: {len(pdp_urls)} PDP candidates"
+            )
+            try:
+                runner = FlowRunner(
+                    config=self.config,
+                    output_dir=str(flow_dir),
+                    platform=platform,
+                    browser_type=self.browser_type,
+                    cookie_jar=cookie_jar,
+                )
+                journey = await runner.run(
+                    pdp_urls=pdp_urls, search_term=coverage_cfg.search_term
+                )
+                journey.save(str(flow_dir / "journey.json"))
+                all_screens.extend(self._extract_screens_from_journey(journey))
+
+                completed_session_ids.add(session_id)
+                if checkpoint_path is not None:
+                    self._save_checkpoint(
+                        checkpoint_path, completed_session_ids, all_screens, 0
+                    )
+            except Exception as e:
+                logger.error(f"Directed flows failed on {platform.type}: {e}", exc_info=True)
+
+    def _discover_urls(self, output_dir: Path, page_type: str, platform_type: str, limit: int = 10):
+        """Collect URLs of a given page type from journey.json files in the run.
+
+        Prefers URLs captured on the same platform; falls back to any platform.
+        """
+        same_platform, other = [], []
+        for jf in sorted(Path(output_dir).glob("**/journey.json")):
+            try:
+                data = json.loads(jf.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            jf_platform = (data.get("platform") or {}).get("type")
+            for step in data.get("steps", []):
+                url = step.get("url")
+                if not url or PageClassifier.classify_url(url) != page_type:
+                    continue
+                bucket = same_platform if jf_platform == platform_type else other
+                if url not in bucket:
+                    bucket.append(url)
+        combined = same_platform + [u for u in other if u not in same_platform]
+        return combined[:limit]
+
+    def _emit_coverage(self, output_dir: Path):
+        """Generate coverage.json + coverage.md and log the found/missed table."""
+        coverage_cfg = getattr(self.config, "coverage", None)
+        if not coverage_cfg or not coverage_cfg.enabled:
+            return None
+        try:
+            report = CoverageReporter(self.config).evaluate(output_dir)
+            logger.info(
+                f"Journey coverage: {report['summary']['found']}/"
+                f"{report['summary']['total']} found"
+            )
+            for line in CoverageReporter.render_table(report).splitlines():
+                logger.info(line)
+            return report
+        except Exception as e:
+            logger.error(f"Coverage report failed: {e}", exc_info=True)
+            return None
 
     def _use_crawlee(self) -> bool:
         """Whether to use CrawleeAdapter based on engine setting."""

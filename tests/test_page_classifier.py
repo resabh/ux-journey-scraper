@@ -45,6 +45,26 @@ class TestURLClassification:
     def test_other(self):
         assert PageClassifier.classify_url("https://example.com/xyz/abc") == "other"
 
+    def test_shopify_pdp(self):
+        # Corpus v1 defect #1: /products/<handle> was mislabeled plp
+        assert PageClassifier.classify_url(
+            "https://www.boat-lifestyle.com/products/airdopes-131"
+        ) == "pdp"
+        assert PageClassifier.classify_url(
+            "https://example.com/collections/speakers/products/stone-1200"
+        ) == "pdp"
+        assert PageClassifier.classify_url(
+            "https://example.com/products/widget?variant=123"
+        ) == "pdp"
+
+    def test_shopify_plp(self):
+        assert PageClassifier.classify_url(
+            "https://www.boat-lifestyle.com/collections/true-wireless-earbuds"
+        ) == "plp"
+        assert PageClassifier.classify_url("https://example.com/collections") == "plp"
+        assert PageClassifier.classify_url("https://example.com/products") == "plp"
+        assert PageClassifier.classify_url("https://example.com/products?page=2") == "plp"
+
 
 class TestContentClassification:
     def test_pdp_by_content(self):

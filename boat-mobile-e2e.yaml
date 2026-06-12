@@ -1,0 +1,27 @@
+target:
+  name: "boAt Lifestyle"
+  base_url: "https://www.boat-lifestyle.com"
+
+platforms:
+  - type: web_mobile
+    viewport:
+      width: 390
+      height: 844
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+auth:
+  logged_out: true
+
+seed_urls:
+  - "https://www.boat-lifestyle.com"
+  - "https://www.boat-lifestyle.com/collections"
+
+crawler:
+  max_depth: 8
+  max_pages: 5
+  delay_ms: 800
+  delay_jitter_ms: 400
+  timeout_per_page_ms: 15000
+  respect_robots: true
+  follow_external_links: false

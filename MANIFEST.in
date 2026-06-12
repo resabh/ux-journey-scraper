@@ -3,3 +3,4 @@ include LICENSE
 include requirements.txt
 include pyproject.toml
 recursive-include ux_journey_scraper *.py
+recursive-include schemas *.json

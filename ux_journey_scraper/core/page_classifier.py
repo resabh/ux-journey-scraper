@@ -17,10 +17,13 @@ class PageClassifier:
                      r"/refund", r"/cookie.*policy", r"/legal", r"/disclaimer"]),
         ("info", [r"/about", r"/contact", r"/faq", r"/help", r"/support", r"/store-locator", r"/stores"]),
         ("content", [r"/blog", r"/article", r"/news", r"/magazine", r"/stories"]),
+        # Shopify-like sites: /products/<handle> is a product detail page,
+        # /collections/<handle> is a listing. pdp rules run before plp so
+        # collection-scoped PDPs (/collections/x/products/y) classify as pdp.
         ("pdp", [r"/p/", r"/product/", r"/dp/", r"/item/", r"/pd/",
-                 r"/products/[^/]+/[^/]+$", r"\d+\.html$"]),
+                 r"/products/[^/?#]+", r"\d+\.html$"]),
         ("plp", [r"/c/", r"/category/", r"/categories/", r"/shop/", r"/collection",
-                 r"/products/[^/]+$", r"/products\?"]),
+                 r"/products$", r"/products\?"]),
     ]
 
     @classmethod

@@ -348,6 +348,71 @@ def scrape(brand, platforms, output_dir, max_pages, appium_server, local, engine
     click.echo(f"{'='*60}\n")
 
 
+@cli.command()
+@click.argument("paths", nargs=-1, type=click.Path(exists=True), required=True)
+@click.option(
+    "--check-screenshots/--no-check-screenshots",
+    default=True,
+    help="Also verify screenshot pixel width / DPR matches the declared viewport",
+)
+def validate(paths, check_screenshots):
+    """Validate journey.json files against the schema contract.
+
+    PATHS can be journey.json files or directories (searched recursively).
+    Exits non-zero if any file fails validation.
+    """
+    import sys
+
+    from ux_journey_scraper.core.schema_validator import (
+        check_screenshot_dimensions,
+        validate_journey_file,
+    )
+
+    files = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            files.extend(sorted(p.glob("**/journey.json")))
+        else:
+            files.append(p)
+
+    if not files:
+        click.echo("No journey.json files found.")
+        sys.exit(1)
+
+    failed = 0
+    for f in files:
+        errors = validate_journey_file(f)
+        if check_screenshots:
+            errors += check_screenshot_dimensions(f)
+        if errors:
+            failed += 1
+            click.echo(f"FAIL {f} ({len(errors)} errors)")
+            for e in errors[:10]:
+                click.echo(f"     - {e}")
+        else:
+            click.echo(f"OK   {f}")
+
+    click.echo(f"\n{len(files) - failed}/{len(files)} journey files valid")
+    sys.exit(1 if failed else 0)
+
+
+@cli.command()
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--config", "config_path", default=None, help="Scrape config YAML (adds site-specific journeys)")
+def coverage(run_dir, config_path):
+    """Generate the journey coverage report for an existing crawl run.
+
+    Writes coverage.json + coverage.md into RUN_DIR and prints the
+    found/missed table.
+    """
+    from ux_journey_scraper.core.coverage_reporter import CoverageReporter
+
+    cfg = ScrapeConfig.load(config_path) if config_path else None
+    report = CoverageReporter(cfg).evaluate(run_dir)
+    click.echo(CoverageReporter.render_table(report))
+
+
 @cli.command("warm-up")
 @click.option(
     "--browser-type",
@@ -383,6 +448,69 @@ def warm_up(browser_type):
         click.echo(f"\nWarm-up failed: {e}")
         import traceback
         traceback.print_exc()
+
+
+@cli.command("import-cookies")
+@click.argument("cookie_file", type=click.Path(exists=True))
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["auto", "json", "netscape"]),
+    default="auto",
+    help="Cookie file format: auto-detect, JSON (browser extensions), or Netscape (cookies.txt)",
+)
+def import_cookies(cookie_file, fmt):
+    """Import cookies from a browser export file into the profile.
+
+    Supports JSON (EditThisCookie, Cookie-Editor exports) and
+    Netscape/wget cookies.txt format.
+
+    Example: ux-journey import-cookies ~/cookies.json
+    """
+    pm = ProfileManager()
+    try:
+        count = pm.import_cookies_file(cookie_file, format=fmt)
+        click.echo(f"Imported {count} cookies into profile.")
+        click.echo(f"Total: {len(pm.get_cookies())} cookies across {len(pm._domains)} domains")
+    except Exception as e:
+        click.echo(f"Import failed: {e}")
+
+
+@cli.command("export-profile")
+@click.argument("output_file", type=click.Path())
+def export_profile(output_file):
+    """Export the full profile (cookies + localStorage) for sharing.
+
+    Example: ux-journey export-profile ~/profile-backup.json
+    """
+    pm = ProfileManager()
+    try:
+        pm.export_profile(output_file)
+        click.echo(f"Profile exported to {output_file}")
+        click.echo(f"Cookies: {len(pm.get_cookies())} across {len(pm._domains)} domains")
+    except Exception as e:
+        click.echo(f"Export failed: {e}")
+
+
+@cli.command("profile-health")
+def profile_health():
+    """Show profile health diagnostics."""
+    pm = ProfileManager()
+    h = pm.get_health()
+
+    click.echo(f"\n{'='*50}")
+    click.echo(f"  PROFILE HEALTH")
+    click.echo(f"{'='*50}\n")
+    click.echo(f"  Cookies:      {h['valid_cookies']} valid, {h['expired_cookies']} expired")
+    click.echo(f"  Domains:      {h['domains']}")
+    click.echo(f"  localStorage: {h['local_storage_domains']} domains")
+    click.echo(f"  Age:          {h['age_hours']}h" if h['age_hours'] is not None else "  Age:          unknown")
+    click.echo(f"  Fresh:        {'yes (needs warm-up)' if h['is_fresh'] else 'no (ready to crawl)'}")
+    if h['domain_list']:
+        click.echo(f"\n  Domains: {', '.join(h['domain_list'][:15])}")
+        if len(h['domain_list']) > 15:
+            click.echo(f"           ... and {len(h['domain_list']) - 15} more")
+    click.echo(f"\n{'='*50}\n")
 
 
 if __name__ == "__main__":

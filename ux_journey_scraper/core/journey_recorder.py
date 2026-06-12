@@ -5,6 +5,7 @@ Main journey recorder engine using Playwright.
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,25 @@ from ux_journey_scraper.core.robots_checker import RobotsChecker
 from ux_journey_scraper.core.screenshot_manager import ScreenshotManager
 
 logger = logging.getLogger(__name__)
+
+# Contract version written into every journey.json. The matching schema file
+# lives at schemas/journey-schema-v<SCHEMA_VERSION>.json.
+SCHEMA_VERSION = "2.3"
+
+
+def _relativize_path(path_str, base_dir: Path) -> str:
+    """Rewrite an artifact path (CWD-relative or absolute) relative to base_dir.
+
+    v2.3 contract: screenshot_path/html_path must be relative to the directory
+    containing journey.json so consumers never have to guess a base directory.
+    """
+    p = Path(path_str)
+    absolute = p if p.is_absolute() else (Path.cwd() / p)
+    try:
+        return os.path.relpath(absolute.resolve(), base_dir)
+    except ValueError:
+        # Different drive on Windows etc. — leave untouched rather than corrupt
+        return path_str
 
 
 class JourneyStep:
@@ -92,7 +112,7 @@ class Journey:
     def to_dict(self):
         """Convert journey to dictionary."""
         result = {
-            "schema_version": "2.2",
+            "schema_version": SCHEMA_VERSION,
             "start_url": self.start_url,
             "viewport": {"width": self.viewport[0], "height": self.viewport[1]},
             "start_time": self.start_time,
@@ -111,16 +131,66 @@ class Journey:
         return result
 
     def save(self, filepath):
-        """Save journey to JSON file."""
+        """Save journey to JSON file.
+
+        Artifact paths (screenshot_path, html_path) are rewritten relative to
+        the journey.json directory per the v2.3 contract, and the result is
+        validated against the schema (non-fatal — errors are logged so a long
+        crawl is never lost over a validation failure).
+        """
+        filepath = Path(filepath)
+        base_dir = filepath.resolve().parent
+        data = self.to_dict()
+        for step in data["steps"]:
+            if step.get("screenshot_path"):
+                step["screenshot_path"] = _relativize_path(
+                    step["screenshot_path"], base_dir
+                )
+            page_data = step.get("page_data") or {}
+            if page_data.get("html_path"):
+                page_data["html_path"] = _relativize_path(
+                    page_data["html_path"], base_dir
+                )
+
         with open(filepath, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+            json.dump(data, f, indent=2)
         logger.info(f"Journey saved to: {filepath}")
+
+        try:
+            from ux_journey_scraper.core.schema_validator import validate_journey_dict
+
+            errors = validate_journey_dict(data)
+            if errors:
+                logger.warning(
+                    f"journey.json FAILS schema v{data['schema_version']} "
+                    f"({len(errors)} errors). First: {errors[0]}"
+                )
+            else:
+                logger.info(
+                    f"journey.json validates against schema v{data['schema_version']}"
+                )
+        except Exception as e:
+            logger.warning(f"Schema validation skipped: {e}")
 
     @classmethod
     def load(cls, filepath):
-        """Load journey from JSON file."""
+        """Load journey from JSON file.
+
+        Relative artifact paths (v2.3) are resolved against the journey.json
+        directory so in-memory steps always hold usable paths.
+        """
         with open(filepath, "r") as f:
             data = json.load(f)
+
+        base_dir = Path(filepath).resolve().parent
+        for step_data in data.get("steps", []):
+            sp = step_data.get("screenshot_path")
+            if sp and not Path(sp).is_absolute() and (base_dir / sp).exists():
+                step_data["screenshot_path"] = str(base_dir / sp)
+            page_data = step_data.get("page_data") or {}
+            hp = page_data.get("html_path")
+            if hp and not Path(hp).is_absolute() and (base_dir / hp).exists():
+                page_data["html_path"] = str(base_dir / hp)
 
         platform_data = data.get("platform", {})
         journey = cls(

@@ -276,6 +276,24 @@ class UXValidationConfig:
 
 
 @dataclass
+class CoverageConfig:
+    """Journey coverage checklist and directed-flow configuration.
+
+    The coverage report compares expected journeys (browse→PDP, add-to-cart→
+    cart-with-items, checkout-start, search→results, login/account, wishlist,
+    order tracking, policy pages + site-specific extras) against what a crawl
+    actually captured, and emits coverage.json + a found/missed table.
+    """
+
+    enabled: bool = True
+    run_flows: bool = True  # Actively complete add-to-cart → cart → checkout-start
+    search_term: str = "headphones"  # Query used for the search→results flow
+    # Site-specific journeys, each:
+    #   {"id": "...", "label": "...", "url_patterns": [...], "url": "optional direct URL"}
+    site_journeys: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class BrowserProvider:
     """Browser backend configuration (local Patchright or cloud Browserbase)."""
 
@@ -342,6 +360,7 @@ class ScrapeConfig:
     proxy: ProxySettings = field(default_factory=ProxySettings)
     browser: BrowserProvider = field(default_factory=BrowserProvider)
     ux_validation: UXValidationConfig = field(default_factory=UXValidationConfig)
+    coverage: CoverageConfig = field(default_factory=CoverageConfig)
 
     # Runtime fields (not from YAML)
     run_id: Optional[str] = None
@@ -463,6 +482,10 @@ class ScrapeConfig:
         browser_data = data.get("browser", {})
         browser = BrowserProvider(**browser_data) if browser_data else BrowserProvider()
 
+        # Parse coverage settings
+        coverage_data = data.get("coverage", {})
+        coverage = CoverageConfig(**coverage_data) if coverage_data else CoverageConfig()
+
         # Parse runtime options
         run_id = data.get("run_id")
         output_dir = data.get("output_dir", "context")
@@ -478,6 +501,7 @@ class ScrapeConfig:
             session_strategy=session_strategy,
             proxy=proxy,
             browser=browser,
+            coverage=coverage,
             run_id=run_id,
             output_dir=output_dir,
             post_order=post_order,
@@ -591,6 +615,12 @@ class ScrapeConfig:
                 "solve_captchas": self.browser.solve_captchas,
                 "keep_alive": self.browser.keep_alive,
                 "context_id": self.browser.context_id,
+            },
+            "coverage": {
+                "enabled": self.coverage.enabled,
+                "run_flows": self.coverage.run_flows,
+                "search_term": self.coverage.search_term,
+                "site_journeys": self.coverage.site_journeys,
             },
         }
 

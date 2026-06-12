@@ -63,6 +63,10 @@ jobs:
         run: |
           pytest tests/ -v --tb=short -m "not integration"
 
+      - name: Validate journey schema contract (producer self-test)
+        run: |
+          python scripts/validate_journeys.py --self-test
+
       - name: Run integration tests
         run: |
           pytest tests/ -v --tb=short -m integration

@@ -52,10 +52,13 @@ class TestJourneyErrorTracking(unittest.TestCase):
         self.assertEqual(loaded.errors[0]["phase"], "screenshot")
         Path(filepath).unlink()
 
-    def test_schema_version_2_2(self):
+    def test_schema_version_current(self):
+        from ux_journey_scraper.core.journey_recorder import SCHEMA_VERSION
+
         j = Journey("https://example.com")
         d = j.to_dict()
-        self.assertEqual(d["schema_version"], "2.2")
+        self.assertEqual(d["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(SCHEMA_VERSION, "2.3")
 
     def test_error_stringifies_exception(self):
         j = Journey("https://example.com")

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Schema contract v2.3, journey coverage, directed flows
+
+- **Schema contract in-repo**: `schemas/journey-schema-v2.2.json` (frozen) and
+  `schemas/journey-schema-v2.3.json` (current). `core/schema_validator.py`
+  validates every journey dict/file; `Journey.save()` validates on every write;
+  CI runs a producer self-test (`scripts/validate_journeys.py --self-test`).
+- **v2.3 contract changes** (fixes corpus v1 defects):
+  - `screenshot_path` / `html_path` now written relative to journey.json's
+    directory (was CWD-relative); absolute paths rejected by schema (defect #3).
+  - `page_type` classification fixed for Shopify-like URLs:
+    `/products/<handle>` = pdp, `/collections/<handle>` = plp; `info` added to
+    the enum (defect #1).
+  - Plain-file URLs (`.md`, `.txt`, feeds, assets) are never captured as
+    journey steps (defect #4, the `/agents.md` stray capture).
+  - Platform viewport/UA/locale now actually applied to the crawlee browser
+    context, with the fingerprint constrained to the device class — mobile
+    crawls previously rendered desktop layouts (defect #5). Steps record
+    `device_pixel_ratio` and `rendered_viewport`; validation asserts
+    screenshot pixel width / DPR equals the declared viewport width.
+- **Journey coverage report** (`core/coverage_reporter.py`): per-site
+  checklist of expected journeys (browse→PDP, add-to-cart→cart-with-items,
+  checkout-start, search→results, login/account, wishlist, order tracking,
+  policy pages + site-specific extras from the `coverage:` config block).
+  Emits `coverage.json` + human-readable `coverage.md` found/missed table
+  after every crawl.
+- **Directed flows** (`core/flow_runner.py`): the crawler now actively
+  COMPLETES add-to-cart → cart-with-items → checkout-start (stopping at
+  checkout — no payment, no orders), search→results, and login captures,
+  instead of only following links. Runs per platform after the
+  link-following sessions; steps are tagged `page_data.flow`.
+- **CLI**: `ux-journey validate <paths>` and `ux-journey coverage <run_dir>`.
+
 ## [0.5.0] - 2026-03-21
 
 ### Added - Native & Wrapper App Testing
