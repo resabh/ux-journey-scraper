@@ -182,7 +182,18 @@ class CrawlOrchestrator:
             try:
                 journey = await crawler.crawl()
 
-                # Save journey.json (consumers like ux_tester need this)
+                # Save journey.json (consumers like ux_tester need this).
+                # Skip empty journeys — schema requires at least one step.
+                if not journey.steps:
+                    logger.warning(
+                        f"Session {plan.session_id} captured 0 pages — "
+                        f"no journey.json written"
+                    )
+                    completed_session_ids.add(plan.session_id)
+                    self._save_checkpoint(
+                        checkpoint_path, completed_session_ids, all_screens, plan.proxy_slot
+                    )
+                    continue
                 session_dir = output_dir / plan.session_id
                 session_dir.mkdir(parents=True, exist_ok=True)
                 journey_file = session_dir / "journey.json"
