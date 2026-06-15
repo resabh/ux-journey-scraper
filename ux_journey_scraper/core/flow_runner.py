@@ -138,9 +138,39 @@ class FlowRunner:
                 context_kwargs["device_scale_factor"] = 2
 
             context = await browser.new_context(**context_kwargs)
+
+            # Anti-detection patches — same as crawlee_adapter's pre_navigation_hook
+            vp = self.viewport
             await context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', "
-                "{get: () => false, configurable: true});"
+                """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => false, configurable: true
+                });
+                Object.defineProperty(window.screen, 'width', { get: () => """
+                + str(vp["width"])
+                + """ });
+                Object.defineProperty(window.screen, 'height', { get: () => """
+                + str(vp["height"])
+                + """ });
+                Object.defineProperty(window.screen, 'availWidth', { get: () => """
+                + str(vp["width"])
+                + """ });
+                Object.defineProperty(window.screen, 'availHeight', { get: () => """
+                + str(vp["height"] - 50)
+                + """ });
+                if (window.RTCPeerConnection) {
+                    const OrigRTC = window.RTCPeerConnection;
+                    window.RTCPeerConnection = function(...args) {
+                        const pc = new OrigRTC(...args);
+                        pc.onicecandidate = null;
+                        Object.defineProperty(pc, 'onicecandidate', {
+                            set: () => {}, get: () => null
+                        });
+                        return pc;
+                    };
+                    window.RTCPeerConnection.prototype = OrigRTC.prototype;
+                }
+                """
             )
 
             if self.cookie_jar:
@@ -380,14 +410,16 @@ class FlowRunner:
 
     async def _goto(self, page, url: str) -> bool:
         try:
-            response = await page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            response = await page.goto(
+                url, timeout=45000, wait_until="domcontentloaded"
+            )
             await page.wait_for_timeout(2500)
             if response is not None and response.status >= 400:
-                logger.debug(f"goto {url[:80]} → HTTP {response.status}")
+                logger.info(f"goto {url[:80]} → HTTP {response.status}")
                 return False
             return True
         except Exception as e:
-            logger.debug(f"goto failed {url[:80]}: {e}")
+            logger.info(f"goto failed {url[:80]}: {e}")
             return False
 
     async def _find_add_to_cart(self, page):

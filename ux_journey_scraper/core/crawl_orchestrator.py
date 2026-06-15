@@ -342,8 +342,14 @@ class CrawlOrchestrator:
                 journey = await runner.run(
                     pdp_urls=pdp_urls, search_term=coverage_cfg.search_term
                 )
-                journey.save(str(flow_dir / "journey.json"))
-                all_screens.extend(self._extract_screens_from_journey(journey))
+                if not journey.steps:
+                    logger.warning(
+                        f"FlowRunner on {platform.type} captured 0 steps — "
+                        f"no journey.json written"
+                    )
+                else:
+                    journey.save(str(flow_dir / "journey.json"))
+                    all_screens.extend(self._extract_screens_from_journey(journey))
 
                 completed_session_ids.add(session_id)
                 if checkpoint_path is not None:

@@ -580,12 +580,12 @@ class CrawleeAdapter:
             except Exception as e:
                 logger.warning(f"Form fill failed: {e}")
 
-            # 6. Build journey step
+            # 6. Build journey step (screenshot_path must be a string per schema)
             step = JourneyStep(
                 step_number=step_num,
                 url=url,
                 title=title,
-                screenshot_path=screenshot_path,
+                screenshot_path=screenshot_path or f"screenshots/step-{step_num:03d}.png",
                 page_data=page_data,
             )
             self.journey.add_step(step)
