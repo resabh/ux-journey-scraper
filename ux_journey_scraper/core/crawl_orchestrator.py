@@ -318,6 +318,7 @@ class CrawlOrchestrator:
         if not coverage_cfg or not coverage_cfg.enabled or not coverage_cfg.run_flows:
             return
 
+        ran_first = False
         for platform in self.config.platforms:
             if not platform.is_web:
                 continue
@@ -325,6 +326,11 @@ class CrawlOrchestrator:
             if session_id in completed_session_ids:
                 logger.info(f"Skipping completed flows session: {session_id}")
                 continue
+
+            if ran_first:
+                logger.info("Cooldown 30s between platform flow runs (avoid 429)")
+                await asyncio.sleep(30)
+            ran_first = True
 
             flow_dir = output_dir / session_id
             pdp_urls = self._discover_urls(output_dir, "pdp", platform.type)
@@ -359,7 +365,7 @@ class CrawlOrchestrator:
             except Exception as e:
                 logger.error(f"Directed flows failed on {platform.type}: {e}", exc_info=True)
 
-    def _discover_urls(self, output_dir: Path, page_type: str, platform_type: str, limit: int = 10):
+    def _discover_urls(self, output_dir: Path, page_type: str, platform_type: str, limit: int = 20):
         """Collect URLs of a given page type from journey.json files in the run.
 
         Prefers URLs captured on the same platform; falls back to any platform.

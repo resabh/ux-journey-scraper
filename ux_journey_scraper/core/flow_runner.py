@@ -28,6 +28,8 @@ from ux_journey_scraper.core.screenshot_manager import ScreenshotManager
 logger = logging.getLogger(__name__)
 
 ADD_TO_CART_SELECTORS = [
+    "#freebie-add-to-cart",  # boAt freebie upsell system (visible <a>)
+    "a.freebie-atc-button",
     'button[name="add"]',  # Shopify default
     'form[action*="/cart/add"] button[type="submit"]',
     'form[action*="/cart/add"] [type="submit"]',
@@ -35,6 +37,16 @@ ADD_TO_CART_SELECTORS = [
     "button#AddToCart",
     'button[class*="add-to-cart" i]',
     'button[id*="add-to-cart" i]',
+    'a[id*="add-to-cart" i]',
+    'a[class*="add-to-cart" i]',
+]
+
+VARIANT_SELECTORS = [
+    "label.color-swatch__item",
+    '.swatch-element label',
+    '[data-option-index] label',
+    '.product-form__input label',
+    'input[type="radio"][name*="option"]',
 ]
 
 ADD_TO_CART_TEXT = re.compile(r"add to (cart|bag|basket)", re.I)
@@ -234,12 +246,15 @@ class FlowRunner:
 
     async def _flow_add_to_cart(self, page, pdp_urls) -> bool:
         """Open a PDP and click add-to-cart. Returns True if an item was added."""
-        candidates = pdp_urls[:4]
+        candidates = pdp_urls[:10]
         if not candidates:
-            # No PDPs discovered — try to find one from the homepage
             await self._goto(page, self.base_url)
-            hrefs = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-            candidates = [h for h in hrefs if PageClassifier.classify_url(h) == "pdp"][:4]
+            hrefs = await page.eval_on_selector_all(
+                "a[href]", "els => els.map(e => e.href)"
+            )
+            candidates = [
+                h for h in hrefs if PageClassifier.classify_url(h) == "pdp"
+            ][:10]
 
         for url in candidates:
             if not await self._goto(page, url):
@@ -423,19 +438,48 @@ class FlowRunner:
             return False
 
     async def _find_add_to_cart(self, page):
+        """Find a visible, enabled add-to-cart control.
+
+        If none is visible on the first pass, try selecting a variant (color
+        swatch) and re-check — some sites hide the button until a variant is
+        chosen.
+        """
+        found = await self._scan_add_to_cart(page)
+        if found:
+            return found
+
+        # Try selecting the first visible variant swatch, then re-scan
+        for selector in VARIANT_SELECTORS:
+            loc = page.locator(selector).first
+            try:
+                if await loc.count() and await loc.is_visible():
+                    await loc.click(timeout=5000)
+                    await page.wait_for_timeout(2000)
+                    found = await self._scan_add_to_cart(page)
+                    if found:
+                        return found
+            except Exception:
+                continue
+        return None
+
+    async def _scan_add_to_cart(self, page):
         for selector in ADD_TO_CART_SELECTORS:
             loc = page.locator(selector).first
             try:
-                if await loc.count() and await loc.is_visible() and await loc.is_enabled():
+                if await loc.count() and await loc.is_visible():
+                    text = (await loc.inner_text()).strip().lower()
+                    if "sold out" in text or "out of stock" in text:
+                        continue
                     return loc
             except Exception:
                 continue
-        try:
-            loc = page.get_by_role("button", name=ADD_TO_CART_TEXT).first
-            if await loc.count() and await loc.is_visible():
-                return loc
-        except Exception:
-            pass
+        for role in ("button", "link"):
+            try:
+                loc = page.get_by_role(role, name=ADD_TO_CART_TEXT).first
+                if await loc.count() and await loc.is_visible():
+                    return loc
+            except Exception:
+                continue
         return None
 
     async def _count_cart_items(self, page) -> int:
