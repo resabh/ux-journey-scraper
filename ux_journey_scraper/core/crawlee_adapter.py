@@ -111,7 +111,7 @@ class CrawleeAdapter:
         # Our analysis components
         self.screenshot_manager = ScreenshotManager(
             output_dir=self.output_dir / "screenshots",
-            blur_pii=True,
+            blur_pii=config.crawler.screenshot_blur_pii,
         )
         self.page_analyzer = PageAnalyzer()
         self.compliance_collector = ComplianceDataCollector()
@@ -222,8 +222,11 @@ class CrawleeAdapter:
         # use_incognito_pages=True required for WebKit (avoids persistent
         # context which calls CDP setDownloadBehavior — unsupported in WebKit)
         # Handler timeout must accommodate behavior simulation (up to 90s dwell)
-        # + inter-page delay (up to 45s) + page load + analysis
-        handler_timeout = timedelta(minutes=5)
+        # + inter-page delay (up to 45s) + page load + analysis. On always-active,
+        # very-tall gold-label sites (jiomart) one page measures ~200s+ (readiness
+        # ~27s + dwell ~109s + analyze ~60s) and the old 5min budget timed out with
+        # zero pages captured. Raised to 10min per ADR p005 (gate-approved).
+        handler_timeout = timedelta(minutes=10)
 
         # Concurrency=1: real users don't open 10 tabs simultaneously
         from crawlee import ConcurrencySettings
@@ -411,6 +414,18 @@ class CrawleeAdapter:
                 await self.readiness.wait_until_ready(page)
             except Exception as e:
                 logger.warning(f"Page readiness wait failed: {e}")
+
+            # Force the declared viewport (ADR p007). browserforge's fingerprint
+            # applies a CDP device-metrics override that the context viewport does
+            # not win against — page.viewport_size reports the declared size but the
+            # real render/screenshot comes out wider (tablet 1280 vs 768). Setting
+            # it here (after navigation/fingerprint, before behavior+screenshot)
+            # guarantees last-write-wins so screenshots match the declared viewport.
+            _vp = self.platform.viewport or {"width": 1920, "height": 1080}
+            try:
+                await page.set_viewport_size({"width": _vp["width"], "height": _vp["height"]})
+            except Exception as e:
+                logger.warning(f"set_viewport_size failed: {e}")
 
             # Get page info for block/empty detection
             title = await page.title() or ""

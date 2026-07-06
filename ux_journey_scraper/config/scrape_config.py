@@ -333,6 +333,10 @@ class CrawlerConfig:
     respect_robots: bool = True  # Check robots.txt
     follow_external_links: bool = False  # Stay within base_url domain
     headless: bool = True  # Run browser in headless mode
+    screenshot_blur_pii: bool = True  # Blur PII in screenshots. Defense-in-depth
+    # for logged-in/PII captures; redundant for logged-out public captures (outputs
+    # are never committed). Safe to disable there — the blur runs an N+1 per-element
+    # scan that hangs on dense pages (ADR p006).
 
     def __post_init__(self):
         """Validate crawler configuration."""
