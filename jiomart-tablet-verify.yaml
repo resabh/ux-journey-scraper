@@ -1,0 +1,34 @@
+target:
+  name: "JioMart"
+  base_url: "https://www.jiomart.com"
+
+platforms:
+  - type: web_tablet
+    viewport:
+      width: 768
+      height: 1024
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+session_strategy:
+  mode: continuous
+  min_cooldown_sec: 5
+  max_cooldown_sec: 10
+
+auth:
+  logged_out: true
+  logged_in: false
+
+seed_urls:
+  - "https://www.jiomart.com"
+
+crawler:
+  max_depth: 2
+  max_pages: 2
+  delay_ms: 600
+  delay_jitter_ms: 300
+  timeout_per_page_ms: 20000
+  respect_robots: true
+  follow_external_links: false
+  headless: false
+  screenshot_blur_pii: false

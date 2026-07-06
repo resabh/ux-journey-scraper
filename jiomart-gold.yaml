@@ -1,0 +1,70 @@
+# jiomart capture — handoff h001 (gold-label benchmark site)
+# 3 fixed platforms per owner decision: desktop 1920x1080, tablet 768x1024 (portrait), mobile 390x844
+# Engine: WebKit (Safari, mac-backed, default). Goal coverage: homepage / PLP / PDP / search / cart.
+
+target:
+  name: "JioMart"
+  base_url: "https://www.jiomart.com"
+
+platforms:
+  - type: web_desktop
+    viewport:
+      width: 1920
+      height: 1080
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+  - type: web_tablet
+    viewport:
+      width: 768
+      height: 1024
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+  - type: web_mobile
+    viewport:
+      width: 390
+      height: 844
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+# jiomart is weak-defense → one continuous session, minimal cooldown (avoids the
+# 15-session × 120-600s cooldown explosion). Anti-detection dwell is unchanged.
+session_strategy:
+  mode: continuous
+  min_cooldown_sec: 10
+  max_cooldown_sec: 30
+
+auth:
+  logged_out: true
+  logged_in: false
+
+seed_urls:
+  - "https://www.jiomart.com"
+  - "https://www.jiomart.com/c/groceries/144"
+  - "https://www.jiomart.com/search/milk"
+
+form_fill:
+  first_name: "Test"
+  last_name: "User"
+  email: "testuser@example.com"
+  phone: "+91 98765 43210"
+  city: "Mumbai"
+  state: "Maharashtra"
+  postal_code: "400001"
+  country: "IN"
+
+crawler:
+  max_depth: 4
+  max_pages: 8   # focused: homepage/PLP/PDP/search/cart via seeds + directed flows
+                 # (each page ~180s; 8×3 platforms keeps the run ~1h)
+  delay_ms: 900
+  delay_jitter_ms: 500
+  timeout_per_page_ms: 20000
+  max_retries: 2
+  respect_robots: true
+  follow_external_links: false
+  headless: false
+  # logged-out public pages with test-only form data → no real PII to blur;
+  # disabling avoids the N+1 PII-scan hang (ADR p006)
+  screenshot_blur_pii: false

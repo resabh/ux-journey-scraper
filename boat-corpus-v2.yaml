@@ -1,0 +1,71 @@
+# boAt corpus v2 capture — desktop + mobile, schema v2.3, directed flows.
+# Output goes to e2e_results/crawls_v2/ (corpus v1 dirs are frozen, read-only).
+
+target:
+  name: "boAt Lifestyle"
+  base_url: "https://www.boat-lifestyle.com"
+
+platforms:
+  - type: web_desktop
+    viewport:
+      width: 1920
+      height: 1080
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+  - type: web_mobile
+    viewport:
+      width: 390
+      height: 844
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+auth:
+  logged_out: true
+
+seed_urls:
+  - "https://www.boat-lifestyle.com"
+  - "https://www.boat-lifestyle.com/collections"
+
+crawler:
+  max_depth: 8
+  max_pages: 200
+  delay_ms: 800
+  delay_jitter_ms: 400
+  timeout_per_page_ms: 20000
+  max_retries: 2
+  respect_robots: true
+  follow_external_links: false
+  headless: true
+
+session_strategy:
+  mode: "split"
+  pages_per_session: 12
+  min_cooldown_sec: 30
+  max_cooldown_sec: 90
+  persist_cookies: true
+  randomize_entry_points: true
+  page_delay_ms: 10000
+
+coverage:
+  enabled: true
+  run_flows: true
+  search_term: "earbuds"
+  site_journeys:
+    - id: gst_bulk_ordering
+      label: "GST / bulk (corporate) ordering"
+      url: "https://www.boat-lifestyle.com/pages/bulk-orders"
+      url_patterns: ["gst", "bulk", "corporate"]
+    - id: gifting_store
+      label: "Gifting store"
+      url: "https://www.boat-lifestyle.com/pages/gifting-with-boat"
+      url_patterns: ["gift"]
+    - id: order_tracking_page
+      label: "Order tracking (manage your orders)"
+      url: "https://www.boat-lifestyle.com/pages/manage-your-orders"
+      url_patterns: ["manage-your-orders"]
+    - id: warranty
+      label: "Warranty registration / terms"
+      url: "https://www.boat-lifestyle.com/pages/warranty"
+      url_patterns: ["warranty"]
+
+output_dir: "e2e_results/crawls_v2/boat"

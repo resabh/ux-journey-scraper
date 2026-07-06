@@ -1,0 +1,80 @@
+# Tira Beauty capture — handoff h001 (second gold-label benchmark site)
+# 3 fixed platforms per owner decision: desktop 1920x1080, tablet 768x1024 (portrait), mobile 390x844
+# Engine: WebKit (Safari, mac-backed, stealthiest default). Goal coverage: homepage / PLP / PDP / search / cart.
+#
+# tira has AGGRESSIVE anti-automation. Unlike jiomart we KEEP the anti-detection
+# fingerprint ON (do not disable). WebKit first; chromium/Patchright is the fallback.
+# Domain confirmed loading: https://www.tirabeauty.com (Indian beauty retailer).
+# Beauty retailer → classic /product/{slug}-{id} PDPs exist (jiomart had none).
+
+target:
+  name: "Tira Beauty"
+  base_url: "https://www.tirabeauty.com"
+
+platforms:
+  - type: web_desktop
+    viewport:
+      width: 1920
+      height: 1080
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+  - type: web_tablet
+    viewport:
+      width: 768
+      height: 1024
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+  - type: web_mobile
+    viewport:
+      width: 390
+      height: 844
+    locale: "en-IN"
+    timezone_id: "Asia/Kolkata"
+
+# Continuous single session with low cooldowns (avoids the multi-session cooldown
+# explosion). Anti-detection dwell unchanged — fingerprint stays ON for tira.
+session_strategy:
+  mode: continuous
+  min_cooldown_sec: 10
+  max_cooldown_sec: 30
+
+auth:
+  logged_out: true
+  logged_in: false
+
+# Seeds cover homepage / PLP (collection) / PDP / search. PDP + search URLs are the
+# known-good ones from the prior tira stealth validation. The autonomous crawler also
+# discovers cart and further journeys from the homepage nav.
+seed_urls:
+  - "https://www.tirabeauty.com"
+  - "https://www.tirabeauty.com/shop/skincare"
+  - "https://www.tirabeauty.com/collection/all-products"
+  - "https://www.tirabeauty.com/search?q=lipstick"
+  - "https://www.tirabeauty.com/product/lakme-9-to-5-primer-matte-lip-color-mp2-rosey-sunday-3-6-g-LAKM00000097"
+
+form_fill:
+  first_name: "Test"
+  last_name: "User"
+  email: "testuser@example.com"
+  phone: "+91 98765 43210"
+  city: "Mumbai"
+  state: "Maharashtra"
+  postal_code: "400001"
+  country: "IN"
+
+crawler:
+  max_depth: 4
+  max_pages: 8   # focused: homepage/PLP/PDP/search/cart via seeds + directed flows
+                 # (each page ~180s; 8×3 platforms keeps the run ~1h)
+  delay_ms: 900
+  delay_jitter_ms: 500
+  timeout_per_page_ms: 20000
+  max_retries: 2
+  respect_robots: true
+  follow_external_links: false
+  headless: true
+  # logged-out public pages with test-only form data → no real PII to blur;
+  # disabling avoids the N+1 PII-scan hang (ADR p006)
+  screenshot_blur_pii: false
