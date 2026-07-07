@@ -66,6 +66,41 @@ class TestURLClassification:
         assert PageClassifier.classify_url("https://example.com/products?page=2") == "plp"
 
 
+    def test_content(self):
+        assert PageClassifier.classify_url("https://example.com/blog/post-1") == "content"
+        assert PageClassifier.classify_url("https://example.com/article/best-phones") == "content"
+
+    def test_sections_as_content(self):
+        assert PageClassifier.classify_url("https://www.jiomart.com/sections/daily-needs") == "content"
+        assert PageClassifier.classify_url("https://www.jiomart.com/sections/fashion-new") == "content"
+        assert PageClassifier.classify_url("https://www.tirabeauty.com/sections/for-you") == "content"
+        assert PageClassifier.classify_url("https://www.tirabeauty.com/sections/whats-new-and-trending") == "content"
+
+    def test_jiomart_urls(self):
+        assert PageClassifier.classify_url("https://www.jiomart.com/") == "homepage"
+        assert PageClassifier.classify_url("https://www.jiomart.com/c/groceries/144") == "plp"
+        assert PageClassifier.classify_url(
+            "https://www.jiomart.com/p/groceries/entros-rollator-walker-silver/590949138"
+        ) == "pdp"
+        assert PageClassifier.classify_url("https://www.jiomart.com/cart/bag") == "cart"
+        assert PageClassifier.classify_url("https://www.jiomart.com/search?q=milk") == "search"
+        assert PageClassifier.classify_url("https://www.jiomart.com/collection/geysers27012026") == "plp"
+
+    def test_tirabeauty_urls(self):
+        assert PageClassifier.classify_url("https://www.tirabeauty.com/") == "homepage"
+        assert PageClassifier.classify_url("https://www.tirabeauty.com/collection/tools-and-appliances") == "plp"
+        assert PageClassifier.classify_url("https://www.tirabeauty.com/cart/bag") == "cart"
+        assert PageClassifier.classify_url(
+            "https://www.tirabeauty.com/auth/login?redirectUrl=%252Fsections%252Ftira-red"
+        ) == "account"
+        assert PageClassifier.classify_url(
+            "https://www.tirabeauty.com/product/lakme-9-to-5-primer-matte-lip-color-mp2-rosey-sunday-3-6-g-LAKM00000097"
+        ) == "pdp"
+        assert PageClassifier.classify_url("https://www.tirabeauty.com/search?q=lipstick") == "search"
+        assert PageClassifier.classify_url("https://www.tirabeauty.com/page/privacy-policy") == "policy"
+        assert PageClassifier.classify_url("https://www.tirabeauty.com/contact-us") == "info"
+
+
 class TestContentClassification:
     def test_pdp_by_content(self):
         result = PageClassifier.classify_by_content(

@@ -78,6 +78,10 @@ class JourneyStep:
         """Get navigation data from page_data."""
         return self.page_data.get("navigation", {})
 
+    def get_search(self) -> Dict:
+        """Get search bar data from page_data."""
+        return self.page_data.get("search", {})
+
     def get_meta(self) -> Dict:
         """Get meta tags from page_data."""
         return self.page_data.get("meta", {})

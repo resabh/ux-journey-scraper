@@ -100,7 +100,8 @@ class FlowRunner:
         self.base_domain = urlparse(config.base_url).netloc.replace("www.", "")
 
         self.screenshot_manager = ScreenshotManager(
-            output_dir=self.output_dir / "screenshots", blur_pii=True
+            output_dir=self.output_dir / "screenshots",
+            blur_pii=config.crawler.screenshot_blur_pii,
         )
         self.page_analyzer = PageAnalyzer()
 
@@ -244,6 +245,58 @@ class FlowRunner:
 
     # ----- individual flows -------------------------------------------------
 
+    async def _discover_pdp_via_click(self, page, search_term: str) -> list:
+        """Discover PDP URLs by clicking product cards on search/PLP pages.
+
+        SPA sites like JioMart render products via JS click handlers with no
+        <a href> links. This navigates to search results and clicks visible
+        product elements to find PDP URLs.
+        """
+        search_url = f"{self.base_url}/search?q={quote_plus(search_term)}"
+        if not await self._goto(page, search_url):
+            return []
+        await self._dismiss_popups(page)
+        await page.wait_for_timeout(2000)
+
+        pdp_urls = await page.evaluate("""() => {
+            const cards = document.querySelectorAll(
+                'a[href*="/p/"], a[href*="/product/"], a[href*="/products/"], a[href*="/dp/"]'
+            );
+            return [...new Set([...cards].map(a => a.href))].slice(0, 5);
+        }""")
+        if pdp_urls:
+            return pdp_urls
+
+        before_url = page.url
+        clicked = await page.evaluate("""() => {
+            const priceEls = [];
+            for (const el of document.querySelectorAll('div, li, article')) {
+                const r = el.getBoundingClientRect();
+                if (r.width < 80 || r.height < 80 || r.top < 0 || r.top > 2000) continue;
+                const text = el.innerText || '';
+                if ((text.includes('\\u20B9') || text.includes('Rs')) && text.length < 300) {
+                    priceEls.push({x: r.x + r.width / 2, y: r.y + r.height / 2});
+                }
+            }
+            return priceEls.slice(0, 3);
+        }""")
+
+        for coord in (clicked or []):
+            try:
+                await page.mouse.click(coord["x"], coord["y"])
+                await page.wait_for_timeout(4000)
+                new_url = page.url
+                if new_url != before_url and PageClassifier.classify_url(new_url) == "pdp":
+                    logger.info(f"Discovered PDP via card click: {new_url[:80]}")
+                    return [new_url]
+                if new_url != before_url:
+                    await page.go_back()
+                    await page.wait_for_timeout(2000)
+            except Exception:
+                continue
+
+        return []
+
     async def _flow_add_to_cart(self, page, pdp_urls) -> bool:
         """Open a PDP and click add-to-cart. Returns True if an item was added."""
         candidates = pdp_urls[:10]
@@ -255,6 +308,12 @@ class FlowRunner:
             candidates = [
                 h for h in hrefs if PageClassifier.classify_url(h) == "pdp"
             ][:10]
+
+        if not candidates:
+            search_term = getattr(
+                getattr(self.config, "coverage", None), "search_term", "product"
+            )
+            candidates = await self._discover_pdp_via_click(page, search_term)
 
         for url in candidates:
             if not await self._goto(page, url):
@@ -499,16 +558,32 @@ class FlowRunner:
             return ""
 
     async def _dismiss_popups(self, page):
-        """Best-effort close of newsletter/consent overlays."""
+        """Dismiss location/pincode popups, cookie consent, and newsletter modals.
+
+        Indian e-commerce sites show a location/delivery-area modal on first
+        visit that covers the full viewport and blocks all interaction.
+        """
         try:
             await page.keyboard.press("Escape")
+            await page.wait_for_timeout(300)
         except Exception:
             pass
-        for selector in (
+
+        close_selectors = [
+            '[class*="AllowLocation" i] [class*="close" i]',
+            '[class*="AddressListModal" i] [class*="close" i]',
+            '[class*="AddressListModal" i] [class*="dismiss" i]',
+            '[class*="location" i][class*="modal" i] [class*="close" i]',
+            '[class*="location" i][class*="popup" i] [class*="close" i]',
+            '[class*="pincode" i][class*="modal" i] [class*="close" i]',
+            '[class*="pincode" i][class*="popup" i] [class*="close" i]',
+            '[class*="delivery" i][class*="modal" i] [class*="close" i]',
             '[aria-label*="close" i]',
             'button[class*="close" i]',
             '[class*="modal" i] [class*="close" i]',
-        ):
+            '[class*="popup" i] [class*="close" i]',
+        ]
+        for selector in close_selectors:
             loc = page.locator(selector).first
             try:
                 if await loc.count() and await loc.is_visible():
@@ -516,6 +591,30 @@ class FlowRunner:
                     await page.wait_for_timeout(400)
             except Exception:
                 continue
+
+        try:
+            removed = await page.evaluate("""() => {
+                let n = 0;
+                const vw = window.innerWidth, vh = window.innerHeight;
+                for (const el of document.querySelectorAll(
+                    '[class*="modal" i], [class*="overlay" i], ' +
+                    '[class*="backdrop" i], [class*="popup" i]'
+                )) {
+                    const s = getComputedStyle(el);
+                    if (s.position !== 'fixed' && s.position !== 'absolute') continue;
+                    if (s.display === 'none' || s.visibility === 'hidden') continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width >= vw * 0.8 && r.height >= vh * 0.8) {
+                        el.style.display = 'none';
+                        n++;
+                    }
+                }
+                return n;
+            }""")
+            if removed:
+                logger.debug(f"Removed {removed} blocking overlay(s) via JS fallback")
+        except Exception:
+            pass
 
     async def _capture(self, page, flow: str, page_type: str = None, extra: dict = None):
         """Record the current page as a journey step tagged with the flow id."""

@@ -16,7 +16,7 @@ class PageClassifier:
         ("policy", [r"/privacy", r"/terms", r"/policy", r"/shipping.*policy", r"/return.*policy",
                      r"/refund", r"/cookie.*policy", r"/legal", r"/disclaimer"]),
         ("info", [r"/about", r"/contact", r"/faq", r"/help", r"/support", r"/store-locator", r"/stores"]),
-        ("content", [r"/blog", r"/article", r"/news", r"/magazine", r"/stories"]),
+        ("content", [r"/blog", r"/article", r"/news", r"/magazine", r"/stories", r"/sections/"]),
         # Shopify-like sites: /products/<handle> is a product detail page,
         # /collections/<handle> is a listing. pdp rules run before plp so
         # collection-scoped PDPs (/collections/x/products/y) classify as pdp.

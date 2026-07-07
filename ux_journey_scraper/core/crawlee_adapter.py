@@ -427,6 +427,12 @@ class CrawleeAdapter:
             except Exception as e:
                 logger.warning(f"set_viewport_size failed: {e}")
 
+            # === OVERLAY DISMISSAL (location/pincode popups, cookie banners) ===
+            try:
+                await self._dismiss_overlays(page)
+            except Exception as e:
+                logger.debug(f"Overlay dismissal failed: {e}")
+
             # Get page info for block/empty detection
             title = await page.title() or ""
             try:
@@ -676,6 +682,65 @@ class CrawleeAdapter:
         logger.info(f"Crawl complete: {self.pages_captured} pages captured")
 
         return self.journey
+
+    async def _dismiss_overlays(self, page):
+        """Dismiss location/pincode popups, cookie consent, and newsletter modals.
+
+        Indian e-commerce sites show a location/delivery-area modal on first
+        visit that covers the full viewport and blocks all interaction.
+        """
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+        close_selectors = [
+            '[class*="AllowLocation" i] [class*="close" i]',
+            '[class*="AddressListModal" i] [class*="close" i]',
+            '[class*="AddressListModal" i] [class*="dismiss" i]',
+            '[class*="location" i][class*="modal" i] [class*="close" i]',
+            '[class*="location" i][class*="popup" i] [class*="close" i]',
+            '[class*="pincode" i][class*="modal" i] [class*="close" i]',
+            '[class*="pincode" i][class*="popup" i] [class*="close" i]',
+            '[class*="delivery" i][class*="modal" i] [class*="close" i]',
+            '[aria-label*="close" i]',
+            'button[class*="close" i]',
+            '[class*="modal" i] [class*="close" i]',
+            '[class*="popup" i] [class*="close" i]',
+        ]
+        for selector in close_selectors:
+            loc = page.locator(selector).first
+            try:
+                if await loc.count() and await loc.is_visible():
+                    await loc.click(timeout=2000)
+                    await page.wait_for_timeout(400)
+            except Exception:
+                continue
+
+        try:
+            removed = await page.evaluate("""() => {
+                let n = 0;
+                const vw = window.innerWidth, vh = window.innerHeight;
+                for (const el of document.querySelectorAll(
+                    '[class*="modal" i], [class*="overlay" i], ' +
+                    '[class*="backdrop" i], [class*="popup" i]'
+                )) {
+                    const s = getComputedStyle(el);
+                    if (s.position !== 'fixed' && s.position !== 'absolute') continue;
+                    if (s.display === 'none' || s.visibility === 'hidden') continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width >= vw * 0.8 && r.height >= vh * 0.8) {
+                        el.style.display = 'none';
+                        n++;
+                    }
+                }
+                return n;
+            }""")
+            if removed:
+                logger.debug(f"Removed {removed} blocking overlay(s) via JS fallback")
+        except Exception:
+            pass
 
     def get_stats(self):
         """Get crawler statistics."""

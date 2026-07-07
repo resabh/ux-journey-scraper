@@ -78,3 +78,8 @@ crawler:
   # logged-out public pages with test-only form data → no real PII to blur;
   # disabling avoids the N+1 PII-scan hang (ADR p006)
   screenshot_blur_pii: false
+
+coverage:
+  enabled: true
+  run_flows: true
+  search_term: "lipstick"
