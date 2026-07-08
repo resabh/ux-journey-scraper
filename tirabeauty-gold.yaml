@@ -64,6 +64,8 @@ form_fill:
   postal_code: "400001"
   country: "IN"
 
+output_dir: "journey_output/tirabeauty_gold"
+
 crawler:
   max_depth: 4
   max_pages: 8   # focused: homepage/PLP/PDP/search/cart via seeds + directed flows

@@ -306,6 +306,17 @@ class CrawleeAdapter:
         @crawler.pre_navigation_hook
         async def on_before_navigation(context):
             page = context.page
+
+            # Location precondition: inject location cookies BEFORE any navigation
+            if self.config.location.cookies_file:
+                try:
+                    with open(self.config.location.cookies_file, "r") as f:
+                        loc_cookies = json.load(f)
+                    await page.context.add_cookies(loc_cookies)
+                    logger.debug(f"Location cookies injected from {self.config.location.cookies_file}")
+                except Exception as e:
+                    logger.warning(f"Location cookie injection failed: {e}")
+
             # Inject cookies from jar
             cookies = self.cookie_jar.get(self.base_domain)
             if cookies:
@@ -553,7 +564,9 @@ class CrawleeAdapter:
             )
 
             page_data = analysis_result
-            page_data["page_type"] = PageClassifier.classify_url(url)
+            page_type, classifier_confidence = PageClassifier.classify_page(url, page_data)
+            page_data["page_type"] = page_type
+            page_data["classifier_confidence"] = classifier_confidence
 
             # Record actual render metrics so consumers/CI can assert that the
             # screenshot matches the declared viewport (corpus v1 defect #5)
@@ -684,10 +697,10 @@ class CrawleeAdapter:
         return self.journey
 
     async def _dismiss_overlays(self, page):
-        """Dismiss location/pincode popups, cookie consent, and newsletter modals.
+        """Dismiss cookie consent, newsletter modals, and app-install banners.
 
-        Indian e-commerce sites show a location/delivery-area modal on first
-        visit that covers the full viewport and blocks all interaction.
+        Location/pincode panels are NOT dismissed here — they are session
+        preconditions handled via cookie injection before navigation.
         """
         try:
             await page.keyboard.press("Escape")
@@ -696,14 +709,13 @@ class CrawleeAdapter:
             pass
 
         close_selectors = [
-            '[class*="AllowLocation" i] [class*="close" i]',
-            '[class*="AddressListModal" i] [class*="close" i]',
-            '[class*="AddressListModal" i] [class*="dismiss" i]',
-            '[class*="location" i][class*="modal" i] [class*="close" i]',
-            '[class*="location" i][class*="popup" i] [class*="close" i]',
-            '[class*="pincode" i][class*="modal" i] [class*="close" i]',
-            '[class*="pincode" i][class*="popup" i] [class*="close" i]',
-            '[class*="delivery" i][class*="modal" i] [class*="close" i]',
+            '[class*="cookie" i] [class*="close" i]',
+            '[class*="cookie" i] [class*="accept" i]',
+            '[class*="consent" i] [class*="close" i]',
+            '[class*="consent" i] [class*="accept" i]',
+            '[class*="newsletter" i] [class*="close" i]',
+            '[class*="app-install" i] [class*="close" i]',
+            '[class*="app-banner" i] [class*="close" i]',
             '[aria-label*="close" i]',
             'button[class*="close" i]',
             '[class*="modal" i] [class*="close" i]',

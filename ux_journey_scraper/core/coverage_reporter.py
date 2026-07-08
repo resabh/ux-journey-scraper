@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 COVERAGE_SCHEMA_VERSION = "1.0"
 
+REQUIRED_PAGE_TYPES = {"homepage", "plp", "pdp", "search_results", "cart"}
+PAGE_TYPE_ALIASES = {"search": "search_results"}
+
 # Default e-commerce journey checklist. Detection precedence per journey:
 #   flow_tags    — step captured by FlowRunner with page_data.flow set
 #                  (proof the flow was COMPLETED, not just a URL match)
@@ -222,6 +225,177 @@ class CoverageReporter:
                     }
                 )
         return evidence
+
+    def emit_readiness(self, run_dir, config=None) -> dict:
+        """Evaluate and write readiness.json per platform directory.
+
+        Non-blocking: benchmark_ready=false is informational, never aborts.
+
+        Args:
+            run_dir: Crawl run directory.
+            config: Optional ScrapeConfig for location check.
+
+        Returns:
+            Dict mapping platform_dir_name -> readiness result.
+        """
+        run_dir = Path(run_dir)
+        cfg = config or self.config
+        results = {}
+
+        for journey_file in sorted(run_dir.glob("**/journey.json")):
+            platform_dir = journey_file.parent
+            try:
+                data = json.loads(journey_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning(f"Readiness skip {journey_file}: {e}")
+                continue
+
+            steps = data.get("steps", [])
+            if not steps:
+                continue
+
+            page_types = set()
+            nav_populated = False
+            forms_populated = False
+            search_detected = False
+            screenshots_ok = True
+
+            for step in steps:
+                pd = step.get("page_data", {})
+                pt = pd.get("page_type", "other")
+                pt = PAGE_TYPE_ALIASES.get(pt, pt)
+                page_types.add(pt)
+
+                nav = pd.get("navigation", {})
+                if nav.get("primary_nav"):
+                    nav_populated = True
+
+                if pd.get("forms"):
+                    forms_populated = True
+
+                search = pd.get("search", {})
+                if search.get("has_search_bar"):
+                    search_detected = True
+
+                if not step.get("screenshot_path"):
+                    screenshots_ok = False
+
+            present = sorted(page_types & REQUIRED_PAGE_TYPES)
+            missing = sorted(REQUIRED_PAGE_TYPES - page_types)
+
+            schema_valid = True
+            try:
+                from ux_journey_scraper.core.schema_validator import (
+                    validate_journey_dict,
+                )
+                errors = validate_journey_dict(data)
+                schema_valid = len(errors) == 0
+            except Exception:
+                schema_valid = False
+
+            location_established = True
+            if cfg and hasattr(cfg, "location") and cfg.location.pincode:
+                location_established = bool(
+                    page_types & {"pdp", "plp", "search_results"}
+                )
+
+            benchmark_ready = (
+                len(missing) == 0
+                and nav_populated
+                and (forms_populated or search_detected)
+                and screenshots_ok
+                and schema_valid
+            )
+
+            readiness = {
+                "page_types_present": present,
+                "page_types_required": sorted(REQUIRED_PAGE_TYPES),
+                "missing_page_types": missing,
+                "primary_nav_populated": nav_populated,
+                "forms_populated": forms_populated,
+                "search_detected": search_detected,
+                "screenshots_per_step": screenshots_ok,
+                "schema_valid": schema_valid,
+                "location_established": location_established,
+                "capture_start": data.get("start_time", ""),
+                "capture_end": data.get("end_time", ""),
+                "benchmark_ready": benchmark_ready,
+            }
+
+            out_path = platform_dir / "readiness.json"
+            out_path.write_text(
+                json.dumps(readiness, indent=2), encoding="utf-8"
+            )
+            status = "READY" if benchmark_ready else "NOT READY"
+            logger.info(
+                f"Readiness [{platform_dir.name}]: {status} "
+                f"types={present} missing={missing}"
+            )
+            results[platform_dir.name] = readiness
+
+        # Combined readiness per base platform (merge crawl + flows)
+        platform_groups = {}
+        for dir_name, r in results.items():
+            base = dir_name.replace("flows_", "")
+            if base not in platform_groups:
+                platform_groups[base] = {
+                    "page_types": set(),
+                    "nav_populated": False,
+                    "forms_populated": False,
+                    "search_detected": False,
+                    "screenshots_ok": True,
+                    "schema_valid": True,
+                    "dirs": [],
+                }
+            g = platform_groups[base]
+            g["page_types"].update(r.get("page_types_present", []))
+            g["nav_populated"] = g["nav_populated"] or r.get("primary_nav_populated", False)
+            g["forms_populated"] = g["forms_populated"] or r.get("forms_populated", False)
+            g["search_detected"] = g["search_detected"] or r.get("search_detected", False)
+            g["screenshots_ok"] = g["screenshots_ok"] and r.get("screenshots_per_step", True)
+            g["schema_valid"] = g["schema_valid"] and r.get("schema_valid", True)
+            g["dirs"].append(dir_name)
+
+        for base, g in platform_groups.items():
+            present = sorted(g["page_types"] & REQUIRED_PAGE_TYPES)
+            missing = sorted(REQUIRED_PAGE_TYPES - g["page_types"])
+            location_established = True
+            if cfg and hasattr(cfg, "location") and cfg.location.pincode:
+                location_established = bool(
+                    g["page_types"] & {"pdp", "plp", "search_results"}
+                )
+            benchmark_ready = (
+                len(missing) == 0
+                and g["nav_populated"]
+                and (g["forms_populated"] or g["search_detected"])
+                and g["screenshots_ok"]
+                and g["schema_valid"]
+            )
+            combined = {
+                "page_types_present": present,
+                "page_types_required": sorted(REQUIRED_PAGE_TYPES),
+                "missing_page_types": missing,
+                "primary_nav_populated": g["nav_populated"],
+                "forms_populated": g["forms_populated"],
+                "search_detected": g["search_detected"],
+                "screenshots_per_step": g["screenshots_ok"],
+                "schema_valid": g["schema_valid"],
+                "location_established": location_established,
+                "benchmark_ready": benchmark_ready,
+                "combined_from": g["dirs"],
+            }
+            out_path = run_dir / f"readiness_{base}.json"
+            out_path.write_text(
+                json.dumps(combined, indent=2), encoding="utf-8"
+            )
+            status = "READY" if benchmark_ready else "NOT READY"
+            logger.info(
+                f"Readiness [{base} combined]: {status} "
+                f"types={present} missing={missing}"
+            )
+            results[f"{base}_combined"] = combined
+
+        return results
 
     @staticmethod
     def render_table(report: dict) -> str:

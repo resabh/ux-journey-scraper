@@ -215,6 +215,88 @@ SEARCH_JS = """() => {
 }"""
 
 
+CLASSIFICATION_SIGNALS_JS = """() => {
+    const signals = {};
+
+    // Add-to-cart presence
+    const atcTexts = /add to (cart|bag|basket)/i;
+    const atcEls = document.querySelectorAll('button, a, input[type="submit"]');
+    signals.has_add_to_cart = [...atcEls].some(el => {
+        const t = (el.textContent || '').trim();
+        return atcTexts.test(t) && el.offsetWidth > 0;
+    });
+
+    // Product schema count (JSON-LD)
+    let productSchemaCount = 0;
+    document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
+        try {
+            const d = JSON.parse(s.textContent);
+            const items = Array.isArray(d) ? d : [d];
+            items.forEach(item => {
+                if (item['@type'] === 'Product' || item['@type'] === 'ProductGroup') {
+                    productSchemaCount++;
+                }
+                if (item['@graph']) {
+                    item['@graph'].forEach(g => {
+                        if (g['@type'] === 'Product') productSchemaCount++;
+                    });
+                }
+            });
+        } catch(e) {}
+    });
+    signals.product_schema_count = productSchemaCount;
+
+    // Visible product cards (elements with price indicator + image)
+    let cardCount = 0;
+    const pricePattern = /[\\u20B9$€£]\\s*[\\d,.]+|Rs\\.?\\s*[\\d,.]+|MRP/;
+    for (const el of document.querySelectorAll('div, li, article, a')) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 100 || r.height < 100 || r.top < -100 || r.top > 3000) continue;
+        if (r.width > window.innerWidth * 0.9) continue; // full-width = not a card
+        const text = el.innerText || '';
+        if (text.length > 500) continue; // too much text for a card
+        if (pricePattern.test(text) && el.querySelector('img')) {
+            cardCount++;
+        }
+    }
+    signals.visible_product_cards = Math.min(cardCount, 100);
+
+    // Filter/facet controls
+    signals.has_filters = !!(
+        document.querySelector('[class*="filter" i]:not([class*="filtered" i])') ||
+        document.querySelector('[class*="facet" i]') ||
+        document.querySelector('[aria-label*="filter" i]') ||
+        document.querySelector('[data-testid*="filter" i]')
+    );
+
+    // Search results indicators
+    const bodyText = (document.body?.innerText || '').slice(0, 3000);
+    signals.has_search_results_text = /showing\\s+\\d+|\\d+\\s+results?\\s+for|search results/i.test(bodyText);
+
+    // Breadcrumb depth
+    let maxCrumbs = 0;
+    const bcSels = ['[class*="breadcrumb" i]', '[aria-label*="breadcrumb" i]', 'ol.breadcrumb'];
+    for (const sel of bcSels) {
+        const el = document.querySelector(sel);
+        if (el) {
+            const items = el.querySelectorAll('a, li, span');
+            maxCrumbs = Math.max(maxCrumbs, items.length);
+            break;
+        }
+    }
+    signals.breadcrumb_depth = maxCrumbs;
+
+    // Single product hero image (large image >30% viewport)
+    const imgs = document.querySelectorAll('img');
+    signals.has_product_hero = [...imgs].some(img => {
+        const r = img.getBoundingClientRect();
+        return r.width > window.innerWidth * 0.3 && r.height > 200 && r.top < 800;
+    });
+
+    return signals;
+}"""
+
+
 class PageAnalyzer:
     """Extract and analyze page elements (forms, CTAs, navigation, etc.)."""
 
@@ -240,6 +322,7 @@ class PageAnalyzer:
         ctas = await self._extract_ctas(page)
         buttons = await self._extract_buttons(page)
         links = self._extract_links(soup)
+        classification_signals = await self._extract_classification_signals(page)
 
         return {
             "url": url,
@@ -252,6 +335,7 @@ class PageAnalyzer:
             "links": links,
             "search": search,
             "meta": self._extract_meta(soup),
+            "classification_signals": classification_signals,
         }
 
     async def _extract_navigation(self, page):
@@ -277,6 +361,14 @@ class PageAnalyzer:
         except Exception as e:
             logger.warning(f"Search extraction failed: {e}")
             return {"has_search_bar": False, "search_inputs": []}
+
+    async def _extract_classification_signals(self, page):
+        """Extract DOM signals for page type classification."""
+        try:
+            return await page.evaluate(CLASSIFICATION_SIGNALS_JS)
+        except Exception as e:
+            logger.warning(f"Classification signals extraction failed: {e}")
+            return {}
 
     async def _extract_ctas(self, page):
         """Extract Call-To-Action elements."""

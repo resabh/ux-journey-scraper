@@ -29,7 +29,7 @@ def cli():
 @cli.command()
 @click.option("--config", required=True, help="Path to YAML configuration file")
 @click.option(
-    "--output-dir", default="journey_output", help="Output directory for results"
+    "--output-dir", default=None, help="Output directory (overrides config file)"
 )
 @click.option(
     "--engine",
@@ -53,7 +53,8 @@ def crawl(config, output_dir, engine, browser_type):
         # Load configuration
         click.echo(f"Loading configuration from: {config}")
         scrape_config = ScrapeConfig.load(config)
-        scrape_config.output_dir = output_dir
+        if output_dir is not None:
+            scrape_config.output_dir = output_dir
         click.echo(f"Configuration loaded")
         click.echo(f"   Target: {scrape_config.target['name']}")
         click.echo(f"   Base URL: {scrape_config.target['base_url']}")
@@ -73,7 +74,7 @@ def crawl(config, output_dir, engine, browser_type):
         click.echo(f"\n{'='*60}")
         click.echo(f"All platforms complete!")
         click.echo(f"Total pages captured: {total_screens}")
-        click.echo(f"Output directory: {output_dir}")
+        click.echo(f"Output directory: {scrape_config.output_dir}")
         click.echo(f"{'='*60}\n")
 
     except FileNotFoundError as e:

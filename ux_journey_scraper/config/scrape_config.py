@@ -276,6 +276,27 @@ class UXValidationConfig:
 
 
 @dataclass
+class LocationConfig:
+    """Location precondition for hyperlocal e-commerce sites.
+
+    Sites like JioMart require location cookies (pincode/geo) BEFORE the
+    catalog renders. Cookies are injected via context.add_cookies() before
+    any navigation, not dismissed as popups.
+    """
+
+    pincode: str = ""
+    cookies_file: Optional[str] = None
+
+    def __post_init__(self):
+        if self.cookies_file:
+            p = Path(self.cookies_file)
+            if not p.exists():
+                raise FileNotFoundError(
+                    f"Location cookies file not found: {self.cookies_file}"
+                )
+
+
+@dataclass
 class CoverageConfig:
     """Journey coverage checklist and directed-flow configuration.
 
@@ -365,6 +386,7 @@ class ScrapeConfig:
     browser: BrowserProvider = field(default_factory=BrowserProvider)
     ux_validation: UXValidationConfig = field(default_factory=UXValidationConfig)
     coverage: CoverageConfig = field(default_factory=CoverageConfig)
+    location: LocationConfig = field(default_factory=LocationConfig)
 
     # Runtime fields (not from YAML)
     run_id: Optional[str] = None
@@ -490,6 +512,10 @@ class ScrapeConfig:
         coverage_data = data.get("coverage", {})
         coverage = CoverageConfig(**coverage_data) if coverage_data else CoverageConfig()
 
+        # Parse location settings
+        location_data = data.get("location", {})
+        location = LocationConfig(**location_data) if location_data else LocationConfig()
+
         # Parse runtime options
         run_id = data.get("run_id")
         output_dir = data.get("output_dir", "context")
@@ -506,6 +532,7 @@ class ScrapeConfig:
             proxy=proxy,
             browser=browser,
             coverage=coverage,
+            location=location,
             run_id=run_id,
             output_dir=output_dir,
             post_order=post_order,
@@ -627,6 +654,12 @@ class ScrapeConfig:
                 "site_journeys": self.coverage.site_journeys,
             },
         }
+
+        if self.location.pincode or self.location.cookies_file:
+            data["location"] = {
+                "pincode": self.location.pincode,
+                **({"cookies_file": self.location.cookies_file} if self.location.cookies_file else {}),
+            }
 
         if self.run_id:
             data["run_id"] = self.run_id

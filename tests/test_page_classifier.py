@@ -101,6 +101,118 @@ class TestURLClassification:
         assert PageClassifier.classify_url("https://www.tirabeauty.com/contact-us") == "info"
 
 
+    def test_jiomart_search_products_q(self):
+        """JioMart uses /products?q= for search, not /search?q=."""
+        assert PageClassifier.classify_url(
+            "https://www.jiomart.com/products?q=milk"
+        ) == "search"
+
+    def test_tirabeauty_pdp(self):
+        assert PageClassifier.classify_url(
+            "https://www.tirabeauty.com/product/lakme-9-to-5-primer-matte-lip-color-mp2-rosey-sunday-3-6-g-LAKM00000097"
+        ) == "pdp"
+
+    def test_tirabeauty_search(self):
+        assert PageClassifier.classify_url(
+            "https://www.tirabeauty.com/search?q=lipstick"
+        ) == "search"
+
+
+class TestClassifyPage:
+    """Tests for classify_page which combines URL + DOM signals."""
+
+    def test_homepage_high_confidence(self):
+        page_type, conf = PageClassifier.classify_page(
+            "https://www.jiomart.com/", {}
+        )
+        assert page_type == "homepage"
+        assert conf >= 0.9
+
+    def test_pdp_with_signals(self):
+        page_type, conf = PageClassifier.classify_page(
+            "https://example.com/p/blue-shoes",
+            {"classification_signals": {
+                "has_add_to_cart": True,
+                "product_schema_count": 1,
+                "visible_product_cards": 1,
+                "has_product_hero": True,
+                "breadcrumb_depth": 4,
+            }},
+        )
+        assert page_type == "pdp"
+        assert conf >= 0.8
+
+    def test_plp_with_signals(self):
+        page_type, conf = PageClassifier.classify_page(
+            "https://example.com/c/shoes",
+            {"classification_signals": {
+                "has_add_to_cart": False,
+                "product_schema_count": 0,
+                "visible_product_cards": 12,
+                "has_filters": True,
+                "breadcrumb_depth": 2,
+            }},
+        )
+        assert page_type == "plp"
+        assert conf >= 0.8
+
+    def test_other_url_pdp_by_dom(self):
+        """URL returns 'other' but DOM signals indicate PDP."""
+        page_type, conf = PageClassifier.classify_page(
+            "https://example.com/xyz/abc",
+            {"classification_signals": {
+                "has_add_to_cart": True,
+                "product_schema_count": 1,
+                "has_product_hero": True,
+                "visible_product_cards": 1,
+                "breadcrumb_depth": 4,
+            }},
+        )
+        assert page_type == "pdp"
+        assert conf >= 0.5
+
+    def test_other_url_plp_by_dom(self):
+        """URL returns 'other' but DOM signals indicate PLP."""
+        page_type, conf = PageClassifier.classify_page(
+            "https://example.com/xyz/abc",
+            {"classification_signals": {
+                "has_add_to_cart": False,
+                "product_schema_count": 3,
+                "visible_product_cards": 20,
+                "has_filters": True,
+                "breadcrumb_depth": 2,
+            }},
+        )
+        assert page_type == "plp"
+        assert conf >= 0.5
+
+    def test_search_with_signals(self):
+        page_type, conf = PageClassifier.classify_page(
+            "https://www.jiomart.com/products?q=milk",
+            {"classification_signals": {
+                "has_search_results_text": True,
+                "visible_product_cards": 10,
+            }},
+        )
+        assert page_type == "search"
+        assert conf >= 0.8
+
+    def test_no_signals_fallback(self):
+        """Without DOM signals, falls back to URL-only with lower confidence."""
+        page_type, conf = PageClassifier.classify_page(
+            "https://example.com/xyz/abc", {}
+        )
+        assert page_type == "other"
+        assert conf <= 0.4
+
+    def test_url_pdp_no_signals(self):
+        page_type, conf = PageClassifier.classify_page(
+            "https://example.com/p/abc", {}
+        )
+        assert page_type == "pdp"
+        assert conf >= 0.8
+
+
 class TestContentClassification:
     def test_pdp_by_content(self):
         result = PageClassifier.classify_by_content(

@@ -13,6 +13,7 @@ can distinguish a completed flow (e.g. a cart that actually has items) from a
 page that merely matched a URL pattern.
 """
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -186,6 +187,16 @@ class FlowRunner:
                 """
             )
 
+            # Location precondition: inject location cookies BEFORE any navigation
+            if self.config.location.cookies_file:
+                try:
+                    with open(self.config.location.cookies_file, "r") as f:
+                        loc_cookies = json.load(f)
+                    await context.add_cookies(loc_cookies)
+                    logger.debug(f"Location cookies injected from {self.config.location.cookies_file}")
+                except Exception as e:
+                    logger.warning(f"Location cookie injection failed: {e}")
+
             if self.cookie_jar:
                 cookies = self.cookie_jar.get(self.base_domain)
                 if cookies:
@@ -195,6 +206,16 @@ class FlowRunner:
                         logger.debug(f"Cookie injection failed: {e}")
 
             page = await context.new_page()
+
+            # Programmatic location solve for hyperlocal sites
+            if self.config.location.pincode:
+                await self._solve_location(page)
+
+            try:
+                await self._flow_homepage_and_plp(page)
+            except Exception as e:
+                logger.warning(f"homepage/plp flow failed: {e}")
+                self.journey.add_error(self.base_url, e, phase="flow_homepage_plp")
 
             cart_ready = False
             try:
@@ -245,19 +266,34 @@ class FlowRunner:
 
     # ----- individual flows -------------------------------------------------
 
-    async def _discover_pdp_via_click(self, page, search_term: str) -> list:
-        """Discover PDP URLs by clicking product cards on search/PLP pages.
+    async def _flow_homepage_and_plp(self, page):
+        """Capture homepage and PLP seed URLs to fill coverage gaps."""
+        for url in self.config.seed_urls:
+            url_type = PageClassifier.classify_url(url)
+            if url_type in ("homepage", "plp"):
+                if await self._goto(page, url):
+                    await self._dismiss_popups(page)
+                    await page.wait_for_timeout(1500)
+                    await self._capture(page, flow=url_type, page_type=url_type)
+                    logger.info(f"{url_type.upper()} captured: {url[:80]}")
 
-        SPA sites like JioMart render products via JS click handlers with no
-        <a href> links. This navigates to search results and clicks visible
-        product elements to find PDP URLs.
+    async def _discover_pdp_via_click(self, page, search_term: str) -> list:
+        """Discover PDP URLs from search/PLP pages.
+
+        Three strategies, tried in order:
+        1. <a href> links with PDP patterns (standard sites)
+        2. Embedded product URLs in SPA state (React/Next hydration data)
+        3. Click product cards and check for SPA navigation
         """
         search_url = f"{self.base_url}/search?q={quote_plus(search_term)}"
         if not await self._goto(page, search_url):
-            return []
+            search_url = f"{self.base_url}/products?q={quote_plus(search_term)}"
+            if not await self._goto(page, search_url):
+                return []
         await self._dismiss_popups(page)
         await page.wait_for_timeout(2000)
 
+        # Strategy 1: standard <a> links
         pdp_urls = await page.evaluate("""() => {
             const cards = document.querySelectorAll(
                 'a[href*="/p/"], a[href*="/product/"], a[href*="/products/"], a[href*="/dp/"]'
@@ -267,6 +303,28 @@ class FlowRunner:
         if pdp_urls:
             return pdp_urls
 
+        # Strategy 2: extract product URLs from SPA state (React SSR hydration)
+        pdp_urls = await page.evaluate(r"""() => {
+            const html = document.documentElement.outerHTML;
+            const re = /\\u002F(?:product|p|dp|item)\\u002F([\w-]+)/g;
+            const found = new Set();
+            let m;
+            while ((m = re.exec(html)) !== null) {
+                found.add('/product/' + m[1]);
+            }
+            if (found.size === 0) {
+                const re2 = /["'](\/(?:product|p|dp|item)\/[\w-]+)["']/g;
+                while ((m = re2.exec(html)) !== null) {
+                    found.add(m[1]);
+                }
+            }
+            return [...found].slice(0, 5).map(p => location.origin + p);
+        }""")
+        if pdp_urls:
+            logger.info(f"Discovered {len(pdp_urls)} PDP URLs from SPA state")
+            return pdp_urls
+
+        # Strategy 3: click product cards
         before_url = page.url
         clicked = await page.evaluate("""() => {
             const priceEls = [];
@@ -274,7 +332,7 @@ class FlowRunner:
                 const r = el.getBoundingClientRect();
                 if (r.width < 80 || r.height < 80 || r.top < 0 || r.top > 2000) continue;
                 const text = el.innerText || '';
-                if ((text.includes('\\u20B9') || text.includes('Rs')) && text.length < 300) {
+                if ((text.includes('₹') || text.includes('Rs')) && text.length < 300) {
                     priceEls.push({x: r.x + r.width / 2, y: r.y + r.height / 2});
                 }
             }
@@ -420,6 +478,7 @@ class FlowRunner:
         search_urls = [
             f"{self.base_url}/search?q={quote_plus(term)}",  # Shopify & most platforms
             f"{self.base_url}/search?query={quote_plus(term)}",
+            f"{self.base_url}/products?q={quote_plus(term)}",  # JioMart SPA
         ]
         for url in search_urls:
             if not await self._goto(page, url):
@@ -480,6 +539,149 @@ class FlowRunner:
             await self._capture(page, flow=entry.get("id", "site_specific"))
             logger.info(f"Site journey captured: {entry.get('id')} at {url[:80]}")
 
+    # ----- location solve ----------------------------------------------------
+
+    async def _solve_location(self, page):
+        """Programmatic location solve for hyperlocal sites.
+
+        Navigates to base_url, detects the address panel, and completes the
+        location flow via Google Places autocomplete. Persists resulting
+        cookies back to cookies_file so subsequent sessions can skip the solve.
+        """
+        pincode = self.config.location.pincode
+        if not pincode:
+            return
+
+        if not await self._goto(page, self.base_url):
+            logger.warning("Location solve: could not load base URL")
+            return
+        await page.wait_for_timeout(2000)
+
+        # Check if location is already established (no address panel visible)
+        panel_visible = False
+        for panel_selector in (
+            '[class*="AddressFullscreenModal" i]',
+            '[class*="address-modal" i]',
+            '[class*="location-modal" i]',
+            '[class*="pincode-modal" i]',
+        ):
+            try:
+                loc = page.locator(panel_selector).first
+                if await loc.count() and await loc.is_visible():
+                    panel_visible = True
+                    break
+            except Exception:
+                continue
+
+        if not panel_visible:
+            # Also check for "Select Location" text prompt
+            try:
+                select_loc = page.get_by_text("Select Location Manually")
+                if await select_loc.count() and await select_loc.is_visible():
+                    panel_visible = True
+            except Exception:
+                pass
+
+        if not panel_visible:
+            logger.info("Location solve: no address panel detected — location may already be set")
+            return
+
+        # Step 1: Click "Select Location Manually"
+        try:
+            manual_btn = page.get_by_text("Select Location Manually")
+            if await manual_btn.count() and await manual_btn.is_visible():
+                await manual_btn.click(timeout=5000)
+                await page.wait_for_timeout(1500)
+        except Exception as e:
+            logger.debug(f"Location solve: 'Select Location Manually' click: {e}")
+
+        # Step 2: Type pincode/area into the Google Places input
+        places_input = page.locator("input.pac-target-input").first
+        try:
+            if not (await places_input.count() and await places_input.is_visible()):
+                # Fallback selectors for the location search input
+                for fallback in (
+                    'input[placeholder*="area" i]',
+                    'input[placeholder*="location" i]',
+                    'input[placeholder*="pincode" i]',
+                    'input[placeholder*="search" i]',
+                ):
+                    places_input = page.locator(fallback).first
+                    if await places_input.count() and await places_input.is_visible():
+                        break
+
+            await places_input.fill("")
+            await places_input.type(pincode, delay=80)
+            await page.wait_for_timeout(2000)
+        except Exception as e:
+            logger.warning(f"Location solve: could not type into places input: {e}")
+            return
+
+        # Step 3: Click the first Google Places suggestion
+        suggestion_clicked = False
+        for suggestion_sel in (".pac-item", '[class*="pac-item"]', '[class*="suggestion" i]'):
+            try:
+                suggestion = page.locator(suggestion_sel).first
+                if await suggestion.count() and await suggestion.is_visible():
+                    await suggestion.click(timeout=5000)
+                    suggestion_clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not suggestion_clicked:
+            logger.warning("Location solve: no autocomplete suggestion appeared")
+            return
+
+        await page.wait_for_timeout(1500)
+
+        # Step 4: Click "Confirm Location"
+        confirm_clicked = False
+        for confirm_sel in (
+            'button.AddressFullscreenModal__confirm-button',
+            'button:has-text("Confirm Location")',
+            'button:has-text("Confirm")',
+            '[class*="confirm" i] button',
+        ):
+            try:
+                confirm = page.locator(confirm_sel).first
+                if await confirm.count() and await confirm.is_visible():
+                    await confirm.click(timeout=5000)
+                    confirm_clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not confirm_clicked:
+            logger.warning("Location solve: could not click confirm button")
+            return
+
+        # Wait for the page to reload/settle after location is set
+        await page.wait_for_timeout(4000)
+
+        logger.info(f"Location solve: completed for pincode {pincode}")
+
+        # Persist cookies so subsequent sessions can reuse them
+        cookies_file = self.config.location.cookies_file
+        if cookies_file:
+            try:
+                cookies = await page.context.cookies()
+                loc_cookies = [
+                    c for c in cookies
+                    if any(k in c.get("name", "") for k in (
+                        "location", "geolocation", "pincode", "address",
+                        "polygon", "city", "lat", "lng",
+                    ))
+                ]
+                if not loc_cookies:
+                    loc_cookies = cookies
+                Path(cookies_file).parent.mkdir(parents=True, exist_ok=True)
+                with open(cookies_file, "w") as f:
+                    json.dump(loc_cookies, f, indent=2)
+                logger.info(f"Location cookies saved to {cookies_file} ({len(loc_cookies)} cookies)")
+            except Exception as e:
+                logger.warning(f"Location solve: cookie save failed: {e}")
+
     # ----- helpers ----------------------------------------------------------
 
     async def _goto(self, page, url: str) -> bool:
@@ -491,6 +693,15 @@ class FlowRunner:
             if response is not None and response.status >= 400:
                 logger.info(f"goto {url[:80]} → HTTP {response.status}")
                 return False
+            # p007 parity: force declared viewport after navigation so
+            # screenshots match the declared dimensions (same as crawlee_adapter)
+            try:
+                await page.set_viewport_size({
+                    "width": self.viewport["width"],
+                    "height": self.viewport["height"],
+                })
+            except Exception as e:
+                logger.debug(f"set_viewport_size failed: {e}")
             return True
         except Exception as e:
             logger.info(f"goto failed {url[:80]}: {e}")
@@ -558,10 +769,10 @@ class FlowRunner:
             return ""
 
     async def _dismiss_popups(self, page):
-        """Dismiss location/pincode popups, cookie consent, and newsletter modals.
+        """Dismiss cookie consent, newsletter modals, and app-install banners.
 
-        Indian e-commerce sites show a location/delivery-area modal on first
-        visit that covers the full viewport and blocks all interaction.
+        Location/pincode panels are NOT dismissed here — they are session
+        preconditions handled via cookie injection before navigation.
         """
         try:
             await page.keyboard.press("Escape")
@@ -570,14 +781,13 @@ class FlowRunner:
             pass
 
         close_selectors = [
-            '[class*="AllowLocation" i] [class*="close" i]',
-            '[class*="AddressListModal" i] [class*="close" i]',
-            '[class*="AddressListModal" i] [class*="dismiss" i]',
-            '[class*="location" i][class*="modal" i] [class*="close" i]',
-            '[class*="location" i][class*="popup" i] [class*="close" i]',
-            '[class*="pincode" i][class*="modal" i] [class*="close" i]',
-            '[class*="pincode" i][class*="popup" i] [class*="close" i]',
-            '[class*="delivery" i][class*="modal" i] [class*="close" i]',
+            '[class*="cookie" i] [class*="close" i]',
+            '[class*="cookie" i] [class*="accept" i]',
+            '[class*="consent" i] [class*="close" i]',
+            '[class*="consent" i] [class*="accept" i]',
+            '[class*="newsletter" i] [class*="close" i]',
+            '[class*="app-install" i] [class*="close" i]',
+            '[class*="app-banner" i] [class*="close" i]',
             '[aria-label*="close" i]',
             'button[class*="close" i]',
             '[class*="modal" i] [class*="close" i]',
@@ -636,7 +846,13 @@ class FlowRunner:
             self.journey.add_error(url, e, phase="flow_page_analysis")
             page_data = {"url": url, "title": title}
 
-        page_data["page_type"] = page_type or PageClassifier.classify_url(url)
+        if page_type:
+            page_data["page_type"] = page_type
+            page_data["classifier_confidence"] = 1.0
+        else:
+            classified_type, confidence = PageClassifier.classify_page(url, page_data)
+            page_data["page_type"] = classified_type
+            page_data["classifier_confidence"] = confidence
         page_data["flow"] = flow
         if extra:
             page_data.update(extra)

@@ -235,6 +235,7 @@ class CrawlOrchestrator:
 
         # Journey coverage report (found/missed is THE progress metric)
         context["coverage"] = self._emit_coverage(output_dir)
+        context["readiness"] = self._emit_readiness(output_dir)
 
         logger.info(f"Crawl complete: {len(all_screens)} total screens")
         return context
@@ -302,6 +303,7 @@ class CrawlOrchestrator:
         context = self._build_context(all_screens, run_id, output_dir)
         context["journeys"] = {k: v for k, v in journeys.items()}
         context["coverage"] = self._emit_coverage(output_dir)
+        context["readiness"] = self._emit_readiness(output_dir)
         logger.info(f"Crawl complete: {len(all_screens)} total screens")
         return context
 
@@ -403,6 +405,15 @@ class CrawlOrchestrator:
             return report
         except Exception as e:
             logger.error(f"Coverage report failed: {e}", exc_info=True)
+            return None
+
+    def _emit_readiness(self, output_dir: Path):
+        """Emit readiness.json per platform directory (non-blocking)."""
+        try:
+            reporter = CoverageReporter(self.config)
+            return reporter.emit_readiness(output_dir, config=self.config)
+        except Exception as e:
+            logger.error(f"Readiness check failed: {e}", exc_info=True)
             return None
 
     def _use_crawlee(self) -> bool:

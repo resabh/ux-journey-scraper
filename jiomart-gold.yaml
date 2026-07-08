@@ -43,6 +43,7 @@ seed_urls:
   - "https://www.jiomart.com"
   - "https://www.jiomart.com/c/groceries/144"
   - "https://www.jiomart.com/search/milk"
+  - "https://www.jiomart.com/product/maggi-2-minute-masala-instant-noodles-420-g-mffmtq-7507362"
 
 form_fill:
   first_name: "Test"
@@ -53,6 +54,8 @@ form_fill:
   state: "Maharashtra"
   postal_code: "400001"
   country: "IN"
+
+output_dir: "journey_output/jiomart_gold"
 
 crawler:
   max_depth: 4
@@ -73,3 +76,7 @@ coverage:
   enabled: true
   run_flows: true
   search_term: "milk"
+
+location:
+  pincode: "400097"
+  cookies_file: "journey_output/jiomart_gold/location_cookies_400097.json"
