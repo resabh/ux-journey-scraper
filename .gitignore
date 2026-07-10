@@ -42,3 +42,6 @@ CLAUDE.local.md
 # Crawl output corpora (never commit scraped site data)
 e2e_results/
 journey_output/
+
+# Local-only workspace (SIT configs, secrets) — never tracked (h044 step 0)
+.local/
