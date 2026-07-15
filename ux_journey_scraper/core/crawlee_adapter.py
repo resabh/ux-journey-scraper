@@ -29,6 +29,10 @@ from ux_journey_scraper.core.navigation_randomizer import NavigationRandomizer
 from ux_journey_scraper.core.page_analyzer import PageAnalyzer
 from ux_journey_scraper.core.page_readiness import PageReadinessEngine
 from ux_journey_scraper.core.screenshot_manager import ScreenshotManager
+from ux_journey_scraper.core.session_preconditions import (
+    OCCLUSION_THRESHOLD,
+    measure_occlusion,
+)
 from ux_journey_scraper.core.sitemap_parser import SitemapParser
 
 from ux_journey_scraper.core.design_data_collector import DesignDataCollector
@@ -515,6 +519,10 @@ class CrawleeAdapter:
 
             # === ANALYSIS LAYER ===
 
+            # Measure overlay occlusion immediately before the screenshot so the
+            # recorded value reflects what the screenshot shows (S1.12 mechanism 4).
+            occlusion_coverage = await measure_occlusion(page)
+
             # 1. Screenshot with retry (page scrolled to top by behavior sequencer)
             screenshot_path = None
             for _attempt in range(3):
@@ -617,6 +625,10 @@ class CrawleeAdapter:
                 "block_signals": [],
             }
             page_data["page_state"] = "live"
+
+            # Occlusion (S1.12 mechanism 4) — measured pre-screenshot above.
+            page_data["overlay_coverage"] = round(occlusion_coverage, 4)
+            page_data["occluded"] = occlusion_coverage > OCCLUSION_THRESHOLD
 
             # 6. Build journey step
             step = JourneyStep(

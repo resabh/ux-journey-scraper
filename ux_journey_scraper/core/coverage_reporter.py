@@ -261,6 +261,7 @@ class CoverageReporter:
             search_detected = False
             screenshots_ok = True
             blocked_steps = []
+            occluded_steps = []
 
             for step in steps:
                 pd = step.get("page_data", {})
@@ -271,6 +272,11 @@ class CoverageReporter:
                         pd.get("response_metadata", {}).get("blocked"):
                     blocked_steps.append(step.get("step_number"))
                     continue
+
+                # Track occluded steps (S1.12 mechanism 4) — a large overlay
+                # covering the page means the screenshot is not benchmark-usable.
+                if pd.get("occluded"):
+                    occluded_steps.append(step.get("step_number"))
 
                 pt = pd.get("page_type", "other")
                 pt = PAGE_TYPE_ALIASES.get(pt, pt)
@@ -300,6 +306,7 @@ class CoverageReporter:
                         screenshots_ok = False
 
             no_blocked_steps = len(blocked_steps) == 0
+            steps_unoccluded = len(occluded_steps) == 0
 
             present = sorted(page_types & REQUIRED_PAGE_TYPES)
             missing = sorted(REQUIRED_PAGE_TYPES - page_types)
@@ -343,6 +350,7 @@ class CoverageReporter:
                 and schema_valid
                 and location_established
                 and no_blocked_steps
+                and steps_unoccluded
             )
 
             readiness = {
@@ -356,6 +364,7 @@ class CoverageReporter:
                 "schema_valid": schema_valid,
                 "location_established": location_established,
                 "no_blocked_steps": no_blocked_steps,
+                "steps_unoccluded": steps_unoccluded,
                 "environment": data.get("environment", "prod"),
                 "capture_start": data.get("start_time", ""),
                 "capture_end": data.get("end_time", ""),
@@ -363,6 +372,8 @@ class CoverageReporter:
             }
             if blocked_steps:
                 readiness["blocked_steps"] = blocked_steps
+            if occluded_steps:
+                readiness["occluded_steps"] = occluded_steps
             if duplicate_groups:
                 readiness["duplicate_frames"] = duplicate_groups
 
@@ -391,6 +402,7 @@ class CoverageReporter:
                     "schema_valid": True,
                     "location_established": True,
                     "no_blocked_steps": True,
+                    "steps_unoccluded": True,
                     "environment": "prod",
                     "dirs": [],
                 }
@@ -403,6 +415,7 @@ class CoverageReporter:
             g["schema_valid"] = g["schema_valid"] and r.get("schema_valid", True)
             g["location_established"] = g["location_established"] and r.get("location_established", True)
             g["no_blocked_steps"] = g["no_blocked_steps"] and r.get("no_blocked_steps", True)
+            g["steps_unoccluded"] = g["steps_unoccluded"] and r.get("steps_unoccluded", True)
             g["environment"] = r.get("environment", g["environment"])
             g["dirs"].append(dir_name)
 
@@ -418,6 +431,7 @@ class CoverageReporter:
                 and g["schema_valid"]
                 and location_established
                 and g["no_blocked_steps"]
+                and g["steps_unoccluded"]
             )
             combined = {
                 "page_types_present": present,
@@ -430,6 +444,7 @@ class CoverageReporter:
                 "schema_valid": g["schema_valid"],
                 "location_established": location_established,
                 "no_blocked_steps": g["no_blocked_steps"],
+                "steps_unoccluded": g["steps_unoccluded"],
                 "environment": g["environment"],
                 "benchmark_ready": benchmark_ready,
                 "combined_from": g["dirs"],

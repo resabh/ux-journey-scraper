@@ -24,6 +24,10 @@ from playwright.async_api import async_playwright
 from ux_journey_scraper.core.anti_crawler_detector import AntiCrawlerDetector
 from ux_journey_scraper.core.journey_recorder import Journey, JourneyStep
 from ux_journey_scraper.core.page_analyzer import PageAnalyzer
+from ux_journey_scraper.core.session_preconditions import (
+    OCCLUSION_THRESHOLD,
+    measure_occlusion,
+)
 from ux_journey_scraper.core.page_classifier import PageClassifier
 from ux_journey_scraper.core.screenshot_manager import ScreenshotManager
 
@@ -996,6 +1000,10 @@ class FlowRunner:
         url = page.url
         title = await page.title()
 
+        # Measure overlay occlusion immediately before the screenshot so the
+        # recorded value reflects what the screenshot shows (S1.12 mechanism 4).
+        occlusion_coverage = await measure_occlusion(page)
+
         screenshot_path = None
         try:
             screenshot_path = await self.screenshot_manager.capture_screenshot(page, self.step_num)
@@ -1036,6 +1044,10 @@ class FlowRunner:
             "block_signals": block_signals,
         }
         page_data["page_state"] = "blocked" if block_signals else "live"
+
+        # Occlusion (S1.12 mechanism 4) — measured pre-screenshot above.
+        page_data["overlay_coverage"] = round(occlusion_coverage, 4)
+        page_data["occluded"] = occlusion_coverage > OCCLUSION_THRESHOLD
 
         try:
             page_data["device_pixel_ratio"] = await page.evaluate("window.devicePixelRatio")

@@ -665,6 +665,61 @@ class TestBlockAwareReadiness(unittest.TestCase):
             self.assertIn("no_blocked_steps", combined)
 
 
+# --- P1b mechanism 4: occlusion gate ---
+
+class TestOcclusionGate(unittest.TestCase):
+
+    def test_threshold_and_record_helper_exist(self):
+        from ux_journey_scraper.core import session_preconditions as sp
+        self.assertTrue(hasattr(sp, "measure_occlusion"))
+        self.assertTrue(hasattr(sp, "record_occlusion"))
+        self.assertGreater(sp.OCCLUSION_THRESHOLD, 0)
+        self.assertLess(sp.OCCLUSION_THRESHOLD, 1)
+
+    @patch("ux_journey_scraper.core.schema_validator.validate_journey_dict", return_value=[])
+    @patch("ux_journey_scraper.core.screenshot_manager.validate_screenshot", return_value=(True, ""))
+    def test_occluded_step_fails_readiness(self, _mv, _ms):
+        from ux_journey_scraper.core.coverage_reporter import CoverageReporter
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            platform_dir = td / "flows_web_desktop"
+            platform_dir.mkdir()
+
+            steps = []
+            for i, pt in enumerate(
+                ["homepage", "plp", "pdp", "search_results", "cart"], 1
+            ):
+                occ = i == 3  # occlude the pdp step
+                steps.append({
+                    "step_number": i, "url": f"https://example.com/{pt}", "title": pt,
+                    "screenshot_path": f"screenshots/step-{i:03d}.png",
+                    "timestamp": "2026-07-08T00:00:00",
+                    "page_data": {"page_type": pt, "url": f"https://example.com/{pt}",
+                                  "title": pt, "page_state": "live",
+                                  "overlay_coverage": 0.6 if occ else 0.02,
+                                  "occluded": occ,
+                                  "navigation": {"primary_nav": [{"text": "Home"}]},
+                                  "forms": [{"action": "/search"}],
+                                  "search": {"has_search_bar": True}},
+                })
+            journey = {
+                "schema_version": "2.3", "start_url": "https://example.com",
+                "viewport": {"width": 1920, "height": 1080},
+                "platform": {"type": "web_desktop"},
+                "start_time": "2026-07-08T00:00:00", "end_time": "2026-07-08T00:01:00",
+                "total_steps": len(steps), "steps": steps,
+            }
+            (platform_dir / "journey.json").write_text(json.dumps(journey))
+
+            reporter = CoverageReporter()
+            results = reporter.emit_readiness(td)
+            readiness = results.get("flows_web_desktop", {})
+            self.assertFalse(readiness["steps_unoccluded"])
+            self.assertIn(3, readiness.get("occluded_steps", []))
+            self.assertFalse(readiness["benchmark_ready"])
+
+
 # --- Journey location_verified serialization ---
 
 class TestJourneyLocationVerified(unittest.TestCase):
