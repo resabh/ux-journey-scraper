@@ -153,6 +153,7 @@ class AutonomousCrawler:
             ),
             platform_type=self.platform.type,
             user_agent=self.platform.user_agent,
+            environment=getattr(self.config, "environment", None),
         )
 
         try:
@@ -386,18 +387,19 @@ class AutonomousCrawler:
                 # Simulate realistic page reading time
                 await self.nav_behaviour.simulate_page_reading(self.page, page_type)
 
-                # Fill forms if present
-                fill_result = await self.form_filler.fill_all_forms(self.page)
-                if fill_result["fields_filled"] > 0:
-                    logger.info(f"Filled {fill_result['fields_filled']} form fields")
+                # Fill forms if present (gated by config)
+                if self.config.form_fill.enabled:
+                    fill_result = await self.form_filler.fill_all_forms(self.page)
+                    if fill_result["fields_filled"] > 0:
+                        logger.info(f"Filled {fill_result['fields_filled']} form fields")
 
-                    # If form filled, wait and capture updated state
-                    await asyncio.sleep(1)
-                    if self.state_registry.is_new_state(
-                        current_url, await self.page.content()
-                    ):
-                        await self._capture_screen()
-                        self.pages_captured += 1
+                        # If form filled, wait and capture updated state
+                        await asyncio.sleep(1)
+                        if self.state_registry.is_new_state(
+                            current_url, await self.page.content()
+                        ):
+                            await self._capture_screen()
+                            self.pages_captured += 1
 
                 # Random browsing behaviors (anti-detection)
                 await self.nav_behaviour.maybe_backtrack(self.page)

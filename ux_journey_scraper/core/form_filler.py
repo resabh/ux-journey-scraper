@@ -24,6 +24,14 @@ class FormFiller:
     # Global kill switch for payment submission
     PAYMENT_SUBMIT_SAFEGUARD = True  # NEVER SET TO FALSE
 
+    NEVER_FILL = frozenset({
+        "cc-name", "cc-number", "cc-exp-month", "cc-exp-year", "cc-exp", "cc-csc",
+    })
+
+    PAYMENT_FIELD_PATTERNS = frozenset({
+        "card_number", "card_cvv", "card_expiry",
+    })
+
     # Autocomplete attribute mapping (HTML5 standard)
     AUTOCOMPLETE_MAP = {
         # Name
@@ -65,7 +73,7 @@ class FormFiller:
         "first_name": [r"first.*name", r"fname", r"given.*name"],
         "last_name": [r"last.*name", r"lname", r"family.*name", r"surname"],
         "email": [r"email", r"e-mail", r"mail"],
-        "phone": [r"phone", r"mobile", r"tel"],
+        "phone": [r"phone", r"mobile", r"telephone", r"(?<![a-z0-9])tel(?![a-z0-9])"],
         "address_line1": [r"address.*1", r"street", r"addr1"],
         "address_line2": [r"address.*2", r"apt", r"suite", r"unit"],
         "city": [r"city", r"town"],
@@ -97,17 +105,20 @@ class FormFiller:
         Returns:
             Dictionary with fill results
         """
-        logger.info("Scanning for forms to fill...")
-
         result = {
             "forms_found": 0,
             "fields_filled": 0,
+            "fields_skipped_payment": 0,
             "payment_detected": False,
             "payment_submitted": False,
         }
 
+        if not getattr(self.config, "enabled", False):
+            return result
+
+        logger.info("Scanning for forms to fill...")
+
         try:
-            # Find all visible input fields
             inputs = await page.query_selector_all(
                 "input:visible, select:visible, textarea:visible"
             )
@@ -117,27 +128,36 @@ class FormFiller:
             for input_el in inputs:
                 field_type = await input_el.get_attribute("type") or "text"
 
-                # Skip submit, button, hidden fields
                 if field_type in ["hidden", "submit", "button", "image", "reset"]:
                     continue
 
-                # Get field attributes for detection
                 autocomplete = await input_el.get_attribute("autocomplete") or ""
                 name = await input_el.get_attribute("name") or ""
                 id_attr = await input_el.get_attribute("id") or ""
                 placeholder = await input_el.get_attribute("placeholder") or ""
 
-                # Detect field value
+                # Payment fields: detect and NEVER fill
+                is_payment = autocomplete in self.NEVER_FILL
+                if not is_payment:
+                    combined = f"{name} {id_attr} {placeholder}".lower()
+                    for pat_key in self.PAYMENT_FIELD_PATTERNS:
+                        for pattern in self.FIELD_PATTERNS.get(pat_key, []):
+                            if re.search(pattern, combined, re.IGNORECASE):
+                                is_payment = True
+                                break
+                        if is_payment:
+                            break
+
+                if is_payment:
+                    result["payment_detected"] = True
+                    result["fields_skipped_payment"] += 1
+                    continue
+
                 value = self._detect_fill_value(
                     autocomplete, name, id_attr, placeholder, field_type
                 )
 
                 if value:
-                    # Check for payment fields
-                    if "card" in autocomplete or "cc-" in autocomplete:
-                        result["payment_detected"] = True
-
-                    # Fill field with human typing
                     try:
                         await input_el.scroll_into_view_if_needed()
                         await input_el.click()
@@ -151,7 +171,6 @@ class FormFiller:
                     except Exception as e:
                         logger.debug(f"Could not fill field {name}: {e}")
 
-            # Handle payment form safeguard
             if result["payment_detected"]:
                 if self.PAYMENT_SUBMIT_SAFEGUARD:
                     logger.warning(
@@ -166,7 +185,8 @@ class FormFiller:
 
             logger.info(
                 f"Form fill complete: {result['fields_filled']} fields filled "
-                f"({result['forms_found']} total fields)"
+                f"({result['forms_found']} total fields, "
+                f"{result['fields_skipped_payment']} payment fields skipped)"
             )
 
             return result
@@ -243,9 +263,6 @@ class FormFiller:
             "state": self.config.state,
             "postal_code": self.config.postal_code,
             "country": self.config.country,
-            "card_number": self.config.card_number,
-            "card_cvv": self.config.card_cvv,
-            "card_expiry": f"{self.config.card_expiry_month}/{self.config.card_expiry_year}",
         }
 
         return mapping.get(field_name)

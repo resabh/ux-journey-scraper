@@ -1,0 +1,573 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/resabh/ux-journey-scraper/schemas/journey-schema-v2.3.json",
+  "title": "UX Journey Capture (journey.json)",
+  "description": "Contract between ux-journey-scraper (producer) and all consumers (ux_tester, compliance_tester, design-system-builder). v2.3 changes vs 2.2: (1) screenshot_path and html_path are RELATIVE TO journey.json's directory (no more CWD-relative paths); (2) page_type classification fixed for Shopify-like URL schemes (/products/<handle> = pdp, /collections/<handle> = plp); (3) 'info' added to the page_type enum. Producers MUST validate output against this schema in CI; consumers MUST tolerate unknown additional fields (additive evolution). Breaking changes require a new schema_version. This schema contains no proprietary data; canonical home is the ux-journey-scraper repo.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "start_url",
+    "platform",
+    "viewport",
+    "steps"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "2.3",
+      "description": "Contract version. This file describes exactly \"2.3\"."
+    },
+    "start_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "start_time": {
+      "type": "string",
+      "description": "ISO 8601 timestamp"
+    },
+    "end_time": {
+      "type": "string",
+      "description": "ISO 8601 timestamp"
+    },
+    "total_steps": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "platform": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "web_desktop",
+            "web_mobile",
+            "web_tablet",
+            "app_ios",
+            "app_android"
+          ],
+          "description": "app_* values reserved for future native-app capture."
+        },
+        "user_agent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "viewport": {
+      "type": "object",
+      "required": [
+        "width",
+        "height"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "required": [
+        "step_number",
+        "url",
+        "screenshot_path",
+        "page_data"
+      ],
+      "properties": {
+        "step_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "title": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "screenshot_path": {
+          "oneOf": [
+            {"type": "string", "pattern": "^[^/]"},
+            {"type": "null"}
+          ],
+          "description": "Path to full-page PNG, relative to the directory containing journey.json (e.g. \"screenshots/step-001.png\"). Absolute paths are not allowed. Null when screenshot capture failed."
+        },
+        "page_data": {
+          "$ref": "#/$defs/pageData"
+        }
+      }
+    },
+    "pageData": {
+      "type": "object",
+      "description": "Structured extraction of the captured page. Either html (inline) or html_path (on disk) MUST be present.",
+      "required": [
+        "url"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "html_path"
+          ]
+        },
+        {
+          "required": [
+            "html"
+          ]
+        }
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "title": {
+          "type": "string"
+        },
+        "html": {
+          "type": "string",
+          "description": "Inline full-page HTML (legacy; large)."
+        },
+        "html_path": {
+          "type": "string",
+          "pattern": "^[^/]",
+          "description": "Path to full-page HTML on disk, relative to the directory containing journey.json (e.g. \"html/step-1.html\"). Absolute paths are not allowed."
+        },
+        "page_type": {
+          "type": "string",
+          "enum": [
+            "homepage",
+            "plp",
+            "pdp",
+            "cart",
+            "checkout",
+            "search",
+            "account",
+            "policy",
+            "info",
+            "content",
+            "other"
+          ],
+          "description": "Page type classified primarily from URL patterns. Fixed in 2.3: /products/<handle> classifies as pdp (was mislabeled plp in 2.2); 'info' (about/contact/faq/help) added to the enum."
+        },
+        "framework": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Detected frontend framework, e.g. svelte, react."
+        },
+        "meta": {
+          "type": "object",
+          "properties": {
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "keywords": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "og_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "og_description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "viewport": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "forms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string"
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "placeholder": {
+                      "type": "string"
+                    },
+                    "required": {
+                      "type": "boolean"
+                    },
+                    "label": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "href": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "buttons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "position": {
+                "$ref": "#/$defs/position"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "ctas": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "href": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "position": {
+                "$ref": "#/$defs/position"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "navigation": {
+          "type": "object",
+          "properties": {
+            "primary_nav": {
+              "$ref": "#/$defs/navLinkList"
+            },
+            "footer_nav": {
+              "$ref": "#/$defs/navLinkList"
+            },
+            "breadcrumbs": {
+              "$ref": "#/$defs/navLinkList"
+            }
+          },
+          "additionalProperties": true
+        },
+        "component_tree": {
+          "type": "array",
+          "description": "Top-level semantic regions of the page.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "tag": {
+                "type": "string"
+              },
+              "className": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "childCount": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "computed_styles": {
+          "type": "object",
+          "description": "Sampled computed styles, keyed by group (e.g. text_elements).",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tag": {
+                  "type": "string"
+                },
+                "color": {
+                  "type": "string"
+                },
+                "background_color": {
+                  "type": "string"
+                },
+                "font_size": {
+                  "type": "string"
+                },
+                "font_weight": {
+                  "type": "string"
+                },
+                "sample_text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "css_variables": {
+          "type": "object",
+          "description": "Custom property name -> value, as declared on the page.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tab_order": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tag": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "tabindex": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "top": {
+                "type": "number"
+              },
+              "left": {
+                "type": "number"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "focus_styles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tag": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "has_visible_focus": {
+                "type": "boolean"
+              },
+              "outline_before": {
+                "type": "string"
+              },
+              "outline_after": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "cookies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              },
+              "domain": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "expires": {
+                "type": "number"
+              },
+              "httpOnly": {
+                "type": "boolean"
+              },
+              "secure": {
+                "type": "boolean"
+              },
+              "sameSite": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "local_storage": {
+          "type": "array",
+          "description": "Array of [key, value] string pairs.",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "network_requests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string"
+              },
+              "resource_type": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "asset_urls": {
+          "type": "object",
+          "description": "Asset URLs grouped by kind (fonts, images, stylesheets, _fontFamilies, ...).",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "navLinkList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "href": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "position": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Bounding box in CSS pixels; null when the element was not visible at capture time.",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

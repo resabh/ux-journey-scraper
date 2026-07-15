@@ -1,11 +1,10 @@
 playwright>=1.40.0
+crawlee[playwright]>=0.5.0
 Pillow>=10.0.0
+numpy>=1.24.0
 beautifulsoup4>=4.12.0
 requests>=2.31.0
 click>=8.1.0
 urllib3>=2.0.0
 tqdm>=4.66.0
 jsonschema>=4.18.0
-
-# Optional: For full UX guidelines analysis
-# ecommerce-ux-guidelines>=1.2.0

@@ -10,6 +10,7 @@ Coverage (found/missed journeys) is the progress metric for crawls — page
 counts alone say nothing about whether cart/checkout/search were captured.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -277,8 +278,17 @@ class CoverageReporter:
                 if search.get("has_search_bar"):
                     search_detected = True
 
-                if not step.get("screenshot_path"):
+                ss_path = step.get("screenshot_path")
+                if not ss_path:
                     screenshots_ok = False
+                else:
+                    from ux_journey_scraper.core.screenshot_manager import validate_screenshot
+                    resolved = Path(ss_path)
+                    if not resolved.is_absolute():
+                        resolved = platform_dir / resolved
+                    is_valid, _ = validate_screenshot(resolved)
+                    if not is_valid:
+                        screenshots_ok = False
 
             present = sorted(page_types & REQUIRED_PAGE_TYPES)
             missing = sorted(REQUIRED_PAGE_TYPES - page_types)
@@ -295,9 +305,24 @@ class CoverageReporter:
 
             location_established = True
             if cfg and hasattr(cfg, "location") and cfg.location.pincode:
-                location_established = bool(
-                    page_types & {"pdp", "plp", "search_results"}
-                )
+                location_established = bool(data.get("location_verified", False))
+
+            # S1.14: detect byte-identical duplicate frames
+            frame_hashes = {}
+            duplicate_groups = []
+            for step in steps:
+                ss = step.get("screenshot_path")
+                if not ss:
+                    continue
+                ss_resolved = Path(ss)
+                if not ss_resolved.is_absolute():
+                    ss_resolved = platform_dir / ss_resolved
+                if ss_resolved.exists():
+                    h = hashlib.sha256(ss_resolved.read_bytes()).hexdigest()
+                    frame_hashes.setdefault(h, []).append(step.get("step_number"))
+            for h, step_nums in frame_hashes.items():
+                if len(step_nums) > 1:
+                    duplicate_groups.append(step_nums)
 
             benchmark_ready = (
                 len(missing) == 0
@@ -305,6 +330,7 @@ class CoverageReporter:
                 and (forms_populated or search_detected)
                 and screenshots_ok
                 and schema_valid
+                and location_established
             )
 
             readiness = {
@@ -317,10 +343,13 @@ class CoverageReporter:
                 "screenshots_per_step": screenshots_ok,
                 "schema_valid": schema_valid,
                 "location_established": location_established,
+                "environment": data.get("environment", "prod"),
                 "capture_start": data.get("start_time", ""),
                 "capture_end": data.get("end_time", ""),
                 "benchmark_ready": benchmark_ready,
             }
+            if duplicate_groups:
+                readiness["duplicate_frames"] = duplicate_groups
 
             out_path = platform_dir / "readiness.json"
             out_path.write_text(
@@ -345,6 +374,7 @@ class CoverageReporter:
                     "search_detected": False,
                     "screenshots_ok": True,
                     "schema_valid": True,
+                    "location_established": True,
                     "dirs": [],
                 }
             g = platform_groups[base]
@@ -354,22 +384,20 @@ class CoverageReporter:
             g["search_detected"] = g["search_detected"] or r.get("search_detected", False)
             g["screenshots_ok"] = g["screenshots_ok"] and r.get("screenshots_per_step", True)
             g["schema_valid"] = g["schema_valid"] and r.get("schema_valid", True)
+            g["location_established"] = g["location_established"] and r.get("location_established", True)
             g["dirs"].append(dir_name)
 
         for base, g in platform_groups.items():
             present = sorted(g["page_types"] & REQUIRED_PAGE_TYPES)
             missing = sorted(REQUIRED_PAGE_TYPES - g["page_types"])
-            location_established = True
-            if cfg and hasattr(cfg, "location") and cfg.location.pincode:
-                location_established = bool(
-                    g["page_types"] & {"pdp", "plp", "search_results"}
-                )
+            location_established = g["location_established"]
             benchmark_ready = (
                 len(missing) == 0
                 and g["nav_populated"]
                 and (g["forms_populated"] or g["search_detected"])
                 and g["screenshots_ok"]
                 and g["schema_valid"]
+                and location_established
             )
             combined = {
                 "page_types_present": present,

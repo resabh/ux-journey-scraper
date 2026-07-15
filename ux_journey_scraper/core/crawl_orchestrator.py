@@ -68,6 +68,14 @@ class CrawlOrchestrator:
         self.engine = engine
         self.auto_warmup = auto_warmup
 
+        if engine in ("auto", "crawlee") and not _CRAWLEE_AVAILABLE:
+            raise RuntimeError(
+                f"engine={engine!r} requires crawlee but it is not installed. "
+                "Install with: pip install crawlee[playwright]  — or use engine='local' "
+                "for the AutonomousCrawler fallback (no location precondition, no dismissal, "
+                "no viewport force)."
+            )
+
     async def run_all(self) -> Dict:
         """
         Main entry point.
@@ -469,7 +477,7 @@ class CrawlOrchestrator:
                 "title": step.title,
                 "screenshot_path": step.screenshot_path,
                 "timestamp": step.timestamp if isinstance(step.timestamp, str) else (step.timestamp.isoformat() if step.timestamp else None),
-                "page_type": getattr(step, "page_type", None) or "unknown",
+                "page_type": (getattr(step, "page_data", None) or {}).get("page_type", "unknown"),
                 "page_data": step.page_data if hasattr(step, "page_data") else {},
             }
             screens.append(screen)

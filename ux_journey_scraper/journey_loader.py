@@ -27,6 +27,7 @@ class JourneyStep:
     timestamp: str
     page_data: Dict
     ux_validation: Optional[Dict] = None
+    journey_dir: Optional[Path] = None
 
     def load_screenshot(self) -> Image.Image:
         """
@@ -44,19 +45,44 @@ class JourneyStep:
         return Image.open(self.screenshot_path)
 
     def load_html(self) -> str:
-        """
-        Load HTML content.
+        """Load HTML content.
 
-        Returns:
-            HTML content as string
+        Resolution order:
+        1. Inline page_data["html"] (no I/O)
+        2. page_data["html_path"] resolved against journey_dir
+           with bounded ancestor walk-up (≤6 levels)
 
         Raises:
-            KeyError: If HTML not in page_data
+            KeyError: If step has NEITHER html nor html_path
+            FileNotFoundError: If html_path is declared but the file is missing
         """
-        if "html" not in self.page_data:
+        if "html" in self.page_data:
+            return self.page_data["html"]
+
+        html_path_str = self.page_data.get("html_path")
+        if not html_path_str:
             raise KeyError(f"No HTML in page_data for step {self.step_number}")
 
-        return self.page_data["html"]
+        html_path = Path(html_path_str)
+        if html_path.is_absolute() and html_path.exists():
+            return html_path.read_text(encoding="utf-8")
+
+        if self.journey_dir:
+            candidate = self.journey_dir / html_path
+            if candidate.exists():
+                return candidate.read_text(encoding="utf-8")
+
+            # Bounded ancestor walk-up for legacy CWD-relative paths
+            base = self.journey_dir
+            for _ in range(6):
+                base = base.parent
+                candidate = base / html_path
+                if candidate.exists():
+                    return candidate.read_text(encoding="utf-8")
+
+        raise FileNotFoundError(
+            f"HTML file not found for step {self.step_number}: {html_path_str}"
+        )
 
     def get_forms(self) -> List[Dict]:
         """Get form data from page_data."""
@@ -163,6 +189,7 @@ class JourneyLoader:
                 timestamp=step_data.get("timestamp", ""),
                 page_data=step_data.get("page_data", {}),
                 ux_validation=step_data.get("ux_validation"),
+                journey_dir=self.journey_dir,
             )
             steps.append(step)
 

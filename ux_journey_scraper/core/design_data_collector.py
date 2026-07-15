@@ -117,6 +117,58 @@ class DesignDataCollector:
         }
     }"""
 
+    TEXT_ELEMENTS_JS = """() => {
+        try {
+            const results = [];
+            const CAP = 500;
+            const TEXT_TAGS = new Set([
+                'p','h1','h2','h3','h4','h5','h6','span','a','li','td','th',
+                'label','button','figcaption','blockquote','cite','em','strong',
+                'small','sub','sup','dt','dd','summary','legend','caption',
+            ]);
+            const scrollX = window.scrollX || window.pageXOffset || 0;
+            const scrollY = window.scrollY || window.pageYOffset || 0;
+
+            const els = document.querySelectorAll(Array.from(TEXT_TAGS).join(','));
+            for (let i = 0; i < els.length && results.length < CAP; i++) {
+                const el = els[i];
+                const text = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+                if (!text || text.length > 500) continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) continue;
+                const cs = getComputedStyle(el);
+                results.push({
+                    tag: el.tagName.toLowerCase(),
+                    text: text.slice(0, 200),
+                    rect: {
+                        x: Math.round(rect.x * 100) / 100,
+                        y: Math.round(rect.y * 100) / 100,
+                        width: Math.round(rect.width * 100) / 100,
+                        height: Math.round(rect.height * 100) / 100,
+                    },
+                    font_size: cs.fontSize,
+                    font_weight: cs.fontWeight,
+                    color: cs.color,
+                });
+            }
+            return {
+                elements: results,
+                coordinate_frame: 'viewport',
+                scroll_offset: { x: scrollX, y: scrollY },
+                viewport: {
+                    width: window.innerWidth,
+                    height: window.innerHeight,
+                },
+                page_size: {
+                    width: document.documentElement.scrollWidth,
+                    height: document.documentElement.scrollHeight,
+                },
+            };
+        } catch(e) {
+            return { elements: [], coordinate_frame: 'viewport', scroll_offset: {x:0,y:0} };
+        }
+    }"""
+
     ASSET_URLS_JS = """() => {
         try {
             const assets = { images: [], stylesheets: [], fonts: [] };
@@ -207,6 +259,13 @@ class DesignDataCollector:
             logger.warning(f"Failed to get component tree: {e}")
             result["component_tree"] = []
 
+        # Text elements with bounding rects
+        try:
+            result["text_elements"] = await page.evaluate(self.TEXT_ELEMENTS_JS)
+        except Exception as e:
+            logger.warning(f"Failed to get text elements: {e}")
+            result["text_elements"] = {"elements": [], "coordinate_frame": "viewport", "scroll_offset": {"x": 0, "y": 0}}
+
         # Asset URLs (images, stylesheets, fonts)
         try:
             result["asset_urls"] = await page.evaluate(self.ASSET_URLS_JS)
@@ -215,3 +274,27 @@ class DesignDataCollector:
             result["asset_urls"] = {"images": [], "stylesheets": [], "fonts": []}
 
         return result
+
+
+async def collect_and_merge_design_data(page, page_data: Dict) -> None:
+    """Collect design data and merge into page_data in-place.
+
+    Single definition, called from both crawlee_adapter and flow_runner.
+    """
+    collector = DesignDataCollector()
+    try:
+        design_data = await collector.collect(page)
+    except Exception as e:
+        logger.warning(f"Design data collection failed: {e}")
+        return
+
+    page_data["css_variables"] = design_data.get("css_variables", {})
+    page_data["component_tree"] = design_data.get("component_tree", [])
+    page_data["asset_urls"] = design_data.get("asset_urls", {})
+    page_data["text_elements"] = design_data.get("text_elements", {"elements": [], "coordinate_frame": "viewport", "scroll_offset": {"x": 0, "y": 0}})
+
+    if isinstance(page_data.get("computed_styles"), list):
+        page_data["computed_styles"] = {"text_elements": page_data["computed_styles"]}
+    elif not isinstance(page_data.get("computed_styles"), dict):
+        page_data["computed_styles"] = {}
+    page_data["computed_styles"]["all_elements"] = design_data.get("all_styles", [])

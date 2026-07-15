@@ -6,10 +6,83 @@ import asyncio
 import logging
 import re
 from pathlib import Path
+from typing import Tuple
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
 logger = logging.getLogger(__name__)
+
+GRADIENT_THRESHOLD = 6.0
+MIN_FILE_SIZE = 1024
+
+
+def validate_screenshot(path) -> Tuple[bool, str]:
+    """Validate a screenshot file for integrity and content quality.
+
+    Returns (is_valid, error_message). error_message is empty when valid.
+    """
+    path = Path(path)
+    if not path.exists():
+        return False, "file does not exist"
+    if path.stat().st_size < MIN_FILE_SIZE:
+        return False, f"file too small ({path.stat().st_size} bytes)"
+
+    try:
+        img = Image.open(path)
+        img.verify()
+    except Exception as e:
+        return False, f"PIL verify failed: {e}"
+
+    try:
+        img = Image.open(path)
+        img.load()
+    except Exception as e:
+        return False, f"PIL load failed: {e}"
+
+    extrema = img.convert("RGB").getextrema()
+    if all(lo == hi for lo, hi in extrema):
+        return False, "single-color image"
+
+    gray = np.array(img.convert("L"), dtype=np.int16)
+    total_px = gray.shape[0] * gray.shape[1]
+
+    if total_px > 80_000_000:
+        # Sample every 4th 1024-row slab
+        slabs = []
+        for start in range(0, gray.shape[0], 4 * 1024):
+            end = min(start + 1024, gray.shape[0])
+            slabs.append(gray[start:end])
+        if slabs:
+            gray = np.concatenate(slabs, axis=0)
+
+    dh = np.abs(np.diff(gray, axis=1)).mean()
+    dv = np.abs(np.diff(gray, axis=0)).mean()
+    grad = (dh + dv) / 2.0
+
+    if grad >= GRADIENT_THRESHOLD:
+        return False, f"garbage frame (gradient={grad:.2f}, threshold={GRADIENT_THRESHOLD})"
+
+    return True, ""
+
+
+def check_suspect_blank(path) -> bool:
+    """Check if a screenshot is near-blank/skeleton (warn-level, not a hard fail)."""
+    path = Path(path)
+    try:
+        img = Image.open(path).convert("RGB")
+        arr = np.array(img)
+        flat = arr.reshape(-1, 3)
+        total = len(flat)
+        from collections import Counter
+        colors = Counter(map(tuple, flat.tolist()[:100000]))
+        top2 = sum(c for _, c in colors.most_common(2))
+        top2_frac = top2 / min(total, 100000)
+        extrema = img.getextrema()
+        flat_frac = sum(1 for lo, hi in extrema if hi - lo < 5) / 3.0
+        return flat_frac > 0.99 and top2_frac > 0.98
+    except Exception:
+        return False
 
 
 class ScreenshotManager:
@@ -85,6 +158,16 @@ class ScreenshotManager:
 
         # Take screenshot
         await page.screenshot(path=str(filepath), full_page=True)
+
+        # Validate screenshot integrity
+        is_valid, error = validate_screenshot(filepath)
+        if not is_valid:
+            logger.warning(f"Screenshot validation failed for step {step_number}: {error}")
+            filepath.unlink(missing_ok=True)
+            return None
+
+        if check_suspect_blank(filepath):
+            logger.info(f"Screenshot step {step_number} flagged as suspect blank/skeleton")
 
         # Blur PII if enabled
         if blur:

@@ -4,11 +4,14 @@ YAML-based configuration system for autonomous crawling.
 Supports multi-platform, multi-auth scenarios with comprehensive form filling.
 """
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -126,6 +129,8 @@ class AuthConfig:
 @dataclass
 class FormFillConfig:
     """Smart form filling configuration (autocomplete-based)."""
+
+    enabled: bool = False
 
     # Personal info
     first_name: str = "Test"
@@ -280,19 +285,26 @@ class LocationConfig:
     """Location precondition for hyperlocal e-commerce sites.
 
     Sites like JioMart require location cookies (pincode/geo) BEFORE the
-    catalog renders. Cookies are injected via context.add_cookies() before
-    any navigation, not dismissed as popups.
+    catalog renders. The FILL mechanism establishes location programmatically.
     """
 
     pincode: str = ""
     cookies_file: Optional[str] = None
+    enforce: bool = False
+    panel_selectors: List[str] = field(default_factory=list)
+    manual_trigger_text: str = ""
+    input_selectors: List[str] = field(default_factory=list)
+    suggestion_selectors: List[str] = field(default_factory=list)
+    confirm_selectors: List[str] = field(default_factory=list)
+    verify_url: str = ""
 
     def __post_init__(self):
         if self.cookies_file:
             p = Path(self.cookies_file)
             if not p.exists():
-                raise FileNotFoundError(
-                    f"Location cookies file not found: {self.cookies_file}"
+                logger.warning(
+                    f"Location cookies file not found: {self.cookies_file} "
+                    "(will be created by the FILL mechanism)"
                 )
 
 
@@ -387,6 +399,8 @@ class ScrapeConfig:
     ux_validation: UXValidationConfig = field(default_factory=UXValidationConfig)
     coverage: CoverageConfig = field(default_factory=CoverageConfig)
     location: LocationConfig = field(default_factory=LocationConfig)
+
+    environment: str = "prod"
 
     # Runtime fields (not from YAML)
     run_id: Optional[str] = None
@@ -516,6 +530,9 @@ class ScrapeConfig:
         location_data = data.get("location", {})
         location = LocationConfig(**location_data) if location_data else LocationConfig()
 
+        # Parse environment
+        environment = data.get("environment", "prod")
+
         # Parse runtime options
         run_id = data.get("run_id")
         output_dir = data.get("output_dir", "context")
@@ -533,6 +550,7 @@ class ScrapeConfig:
             browser=browser,
             coverage=coverage,
             location=location,
+            environment=environment,
             run_id=run_id,
             output_dir=output_dir,
             post_order=post_order,
@@ -661,6 +679,8 @@ class ScrapeConfig:
                 **({"cookies_file": self.location.cookies_file} if self.location.cookies_file else {}),
             }
 
+        if self.environment != "prod":
+            data["environment"] = self.environment
         if self.run_id:
             data["run_id"] = self.run_id
         if self.output_dir != "context":

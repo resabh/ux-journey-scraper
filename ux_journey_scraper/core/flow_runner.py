@@ -113,6 +113,7 @@ class FlowRunner:
             viewport=(vp["width"], vp["height"]),
             platform_type=platform.type,
             user_agent=platform.user_agent,
+            environment=getattr(config, "environment", None),
         )
         self.step_num = 0
 
@@ -355,6 +356,31 @@ class FlowRunner:
 
         return []
 
+    _OOS_PATTERN = re.compile(
+        r"sold\s*out|out\s*of\s*stock|notify\s*me|unavailable|coming\s*soon",
+        re.IGNORECASE,
+    )
+
+    async def _check_pdp_availability(self, page) -> str:
+        """Tri-state availability check: in_stock / out_of_stock / unknown."""
+        button = await self._find_add_to_cart(page)
+        if button is None:
+            return "unknown"
+
+        try:
+            is_enabled = await button.is_enabled()
+            disabled_attr = await button.get_attribute("disabled")
+            aria_disabled = await button.get_attribute("aria-disabled")
+            text = (await button.inner_text()).strip()
+        except Exception:
+            return "unknown"
+
+        if disabled_attr is not None or aria_disabled == "true" or not is_enabled:
+            return "out_of_stock"
+        if self._OOS_PATTERN.search(text):
+            return "out_of_stock"
+        return "in_stock"
+
     async def _flow_add_to_cart(self, page, pdp_urls) -> bool:
         """Open a PDP and click add-to-cart. Returns True if an item was added."""
         candidates = pdp_urls[:10]
@@ -373,11 +399,25 @@ class FlowRunner:
             )
             candidates = await self._discover_pdp_via_click(page, search_term)
 
+        first_oos_url = None
         for url in candidates:
             if not await self._goto(page, url):
                 continue
             await self._dismiss_popups(page)
-            await self._capture(page, flow="pdp_view")
+
+            availability = await self._check_pdp_availability(page)
+            if availability == "out_of_stock":
+                logger.info(f"PDP out-of-stock: {url[:80]}")
+                if first_oos_url is None:
+                    first_oos_url = url
+                continue
+            if availability == "unknown" and first_oos_url is not None:
+                continue
+
+            await self._capture(
+                page, flow="pdp_view",
+                extra={"availability": availability},
+            )
 
             button = await self._find_add_to_cart(page)
             if button is None:
@@ -388,10 +428,24 @@ class FlowRunner:
             except Exception as e:
                 logger.info(f"add-to-cart click failed on {url[:80]}: {e}")
                 continue
-            await page.wait_for_timeout(3500)  # cart drawer / ajax add
+            await page.wait_for_timeout(3500)
             await self._capture(page, flow="add_to_cart")
             logger.info(f"Added to cart from {url[:80]}")
             return True
+
+        # All candidates exhausted — capture one OOS fallback if available
+        if first_oos_url:
+            if await self._goto(page, first_oos_url):
+                await self._dismiss_popups(page)
+                await self._capture(
+                    page, flow="pdp_view",
+                    extra={"availability": "out_of_stock"},
+                )
+                self.journey.add_error(
+                    first_oos_url,
+                    Exception("All PDP candidates out of stock"),
+                    phase="flow_add_to_cart",
+                )
 
         logger.warning("add-to-cart: no PDP produced a clickable add button")
         return False
@@ -547,6 +601,7 @@ class FlowRunner:
         Navigates to base_url, detects the address panel, and completes the
         location flow via Google Places autocomplete. Persists resulting
         cookies back to cookies_file so subsequent sessions can skip the solve.
+        Always verifies via PDP load regardless of whether the fill was needed.
         """
         pincode = self.config.location.pincode
         if not pincode:
@@ -557,7 +612,7 @@ class FlowRunner:
             return
         await page.wait_for_timeout(2000)
 
-        # Check if location is already established (no address panel visible)
+        # Check if location panel is visible (needs fill)
         panel_visible = False
         for panel_selector in (
             '[class*="AddressFullscreenModal" i]',
@@ -574,7 +629,6 @@ class FlowRunner:
                 continue
 
         if not panel_visible:
-            # Also check for "Select Location" text prompt
             try:
                 select_loc = page.get_by_text("Select Location Manually")
                 if await select_loc.count() and await select_loc.is_visible():
@@ -582,10 +636,16 @@ class FlowRunner:
             except Exception:
                 pass
 
-        if not panel_visible:
-            logger.info("Location solve: no address panel detected — location may already be set")
-            return
+        if panel_visible:
+            await self._fill_location(page, pincode)
+        else:
+            logger.info("Location solve: no address panel detected — location may already be set via cookies")
 
+        # Always verify via PDP load — whether fill was needed or cookies sufficed
+        await self._verify_location_pdp(page)
+
+    async def _fill_location(self, page, pincode):
+        """Fill the location modal with pincode and confirm."""
         # Step 1: Click "Select Location Manually"
         try:
             manual_btn = page.get_by_text("Select Location Manually")
@@ -599,7 +659,6 @@ class FlowRunner:
         places_input = page.locator("input.pac-target-input").first
         try:
             if not (await places_input.count() and await places_input.is_visible()):
-                # Fallback selectors for the location search input
                 for fallback in (
                     'input[placeholder*="area" i]',
                     'input[placeholder*="location" i]',
@@ -656,12 +715,10 @@ class FlowRunner:
             logger.warning("Location solve: could not click confirm button")
             return
 
-        # Wait for the page to reload/settle after location is set
         await page.wait_for_timeout(4000)
+        logger.info(f"Location solve: completed fill for pincode {pincode}")
 
-        logger.info(f"Location solve: completed for pincode {pincode}")
-
-        # Persist cookies so subsequent sessions can reuse them
+        # Persist cookies
         cookies_file = self.config.location.cookies_file
         if cookies_file:
             try:
@@ -674,13 +731,57 @@ class FlowRunner:
                     ))
                 ]
                 if not loc_cookies:
-                    loc_cookies = cookies
-                Path(cookies_file).parent.mkdir(parents=True, exist_ok=True)
-                with open(cookies_file, "w") as f:
-                    json.dump(loc_cookies, f, indent=2)
-                logger.info(f"Location cookies saved to {cookies_file} ({len(loc_cookies)} cookies)")
+                    logger.warning("Location solve: no location-matching cookies found, skipping save")
+                else:
+                    Path(cookies_file).parent.mkdir(parents=True, exist_ok=True)
+                    with open(cookies_file, "w") as f:
+                        json.dump(loc_cookies, f, indent=2)
+                    logger.info(f"Location cookies saved to {cookies_file} ({len(loc_cookies)} cookies)")
             except Exception as e:
                 logger.warning(f"Location solve: cookie save failed: {e}")
+
+    async def _verify_location_pdp(self, page):
+        """Verify location is established by loading a known PDP."""
+        verify_url = getattr(self.config.location, "verify_url", None)
+        if not verify_url:
+            self.journey.location_verified = True
+            logger.info("Location solve: no verify_url configured, marking verified")
+            return
+
+        for attempt in range(2):
+            try:
+                resp = await page.goto(verify_url, timeout=30000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(5000)
+                # Dismiss any overlay that appeared after navigation
+                try:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(500)
+                except Exception:
+                    pass
+                has_product = await page.evaluate("""() => {
+                    const atc = document.querySelector('[class*="add-to-cart" i], [class*="addtocart" i], button[id*="add-to-cart" i]');
+                    const schema = document.querySelector('script[type="application/ld+json"]');
+                    const price = document.querySelector('[class*="price" i], [class*="selling" i]');
+                    const productName = document.querySelector('[class*="product-name" i], [class*="product-title" i], h1');
+                    return !!(atc || schema || price || productName);
+                }""")
+                if has_product and resp and resp.status < 400:
+                    self.journey.location_verified = True
+                    logger.info(f"Location verified via PDP: {verify_url}")
+                    return
+                elif attempt == 0:
+                    logger.debug(f"Location verify attempt 1 failed, retrying...")
+                    await page.wait_for_timeout(3000)
+                else:
+                    self.journey.location_verified = False
+                    logger.warning(f"Location verification failed: product signal not found at {verify_url}")
+            except Exception as e:
+                if attempt == 1:
+                    self.journey.location_verified = False
+                    logger.warning(f"Location verification failed: {e}")
+                else:
+                    logger.debug(f"Location verify attempt 1 error: {e}")
+                    await page.wait_for_timeout(2000)
 
     # ----- helpers ----------------------------------------------------------
 
@@ -773,7 +874,12 @@ class FlowRunner:
 
         Location/pincode panels are NOT dismissed here — they are session
         preconditions handled via cookie injection before navigation.
+        Elements matching location.panel_selectors are excluded from dismissal.
         """
+        location_panel_sels = []
+        if self.config and hasattr(self.config, "location"):
+            location_panel_sels = getattr(self.config.location, "panel_selectors", [])
+
         try:
             await page.keyboard.press("Escape")
             await page.wait_for_timeout(300)
@@ -797,34 +903,58 @@ class FlowRunner:
             loc = page.locator(selector).first
             try:
                 if await loc.count() and await loc.is_visible():
+                    if location_panel_sels and await self._is_inside_location_panel(
+                        page, loc, location_panel_sels
+                    ):
+                        logger.debug(f"Skipping dismiss: element matches location panel")
+                        continue
                     await loc.click(timeout=2000)
                     await page.wait_for_timeout(400)
             except Exception:
                 continue
 
         try:
-            removed = await page.evaluate("""() => {
+            exclude_js = "false"
+            if location_panel_sels:
+                sel_list = ", ".join(location_panel_sels)
+                exclude_js = f"el.closest('{sel_list}') !== null"
+
+            removed = await page.evaluate(f"""() => {{
                 let n = 0;
                 const vw = window.innerWidth, vh = window.innerHeight;
                 for (const el of document.querySelectorAll(
                     '[class*="modal" i], [class*="overlay" i], ' +
                     '[class*="backdrop" i], [class*="popup" i]'
-                )) {
+                )) {{
+                    if ({exclude_js}) continue;
                     const s = getComputedStyle(el);
                     if (s.position !== 'fixed' && s.position !== 'absolute') continue;
                     if (s.display === 'none' || s.visibility === 'hidden') continue;
                     const r = el.getBoundingClientRect();
-                    if (r.width >= vw * 0.8 && r.height >= vh * 0.8) {
+                    if (r.width >= vw * 0.8 && r.height >= vh * 0.8) {{
                         el.style.display = 'none';
                         n++;
-                    }
-                }
+                    }}
+                }}
                 return n;
-            }""")
+            }}""")
             if removed:
                 logger.debug(f"Removed {removed} blocking overlay(s) via JS fallback")
         except Exception:
             pass
+
+    async def _is_inside_location_panel(self, page, locator, panel_selectors):
+        """Check if a locator element is inside a location panel."""
+        try:
+            for panel_sel in panel_selectors:
+                is_inside = await locator.evaluate(
+                    f"el => el.closest('{panel_sel}') !== null"
+                )
+                if is_inside:
+                    return True
+        except Exception:
+            pass
+        return False
 
     async def _capture(self, page, flow: str, page_type: str = None, extra: dict = None):
         """Record the current page as a journey step tagged with the flow id."""
@@ -870,6 +1000,13 @@ class FlowRunner:
             html_file.write_text(page_data["html"], encoding="utf-8")
             page_data["html_path"] = str(html_file)
             del page_data["html"]
+
+        # Design data collection (S1.11)
+        try:
+            from ux_journey_scraper.core.design_data_collector import collect_and_merge_design_data
+            await collect_and_merge_design_data(page, page_data)
+        except Exception as e:
+            logger.warning(f"flow design data collection failed: {e}")
 
         self.journey.add_step(
             JourneyStep(

@@ -129,6 +129,7 @@ class CrawleeAdapter:
             viewport=(vp_width, vp_height),
             platform_type=self.platform.type,
             user_agent=self.platform.user_agent,
+            environment=getattr(config, "environment", None),
         )
         self.pages_captured = 0
         self.captured_urls = set()
@@ -551,17 +552,8 @@ class CrawleeAdapter:
                     self.journey.add_error(url, e, phase="compliance_collection")
                     return {}
 
-            async def _design():
-                try:
-                    return await self.design_collector.collect(page)
-                except Exception as e:
-                    logger.warning(f"Design data collection failed: {e}")
-                    self.journey.add_error(url, e, phase="design_collection")
-                    return {}
-
-            analysis_result, compliance_data, design_data = await asyncio.gather(
-                _analyze(), _compliance(), _design()
-            )
+            analysis_result = await _analyze()
+            compliance_data = await _compliance()
 
             page_data = analysis_result
             page_type, classifier_confidence = PageClassifier.classify_page(url, page_data)
@@ -588,15 +580,9 @@ class CrawleeAdapter:
                 del page_data["html"]
             page_data.update(compliance_data)
 
-            # Merge design data
-            page_data["css_variables"] = design_data.get("css_variables", {})
-            page_data["component_tree"] = design_data.get("component_tree", [])
-            page_data["asset_urls"] = design_data.get("asset_urls", {})
-            if isinstance(page_data.get("computed_styles"), list):
-                page_data["computed_styles"] = {"text_elements": page_data["computed_styles"]}
-            elif not isinstance(page_data.get("computed_styles"), dict):
-                page_data["computed_styles"] = {}
-            page_data["computed_styles"]["all_elements"] = design_data.get("all_styles", [])
+            # Merge design data via shared function
+            from ux_journey_scraper.core.design_data_collector import collect_and_merge_design_data
+            await collect_and_merge_design_data(page, page_data)
 
             # 4. Framework detection
             if self.cdp_detector:
@@ -606,20 +592,22 @@ class CrawleeAdapter:
                 except Exception:
                     page_data["framework"] = "unknown"
 
-            # 5. Form filling
-            try:
-                fill_result = await self.form_filler.fill_all_forms(page)
-                if fill_result["fields_filled"] > 0:
-                    logger.info(f"Filled {fill_result['fields_filled']} form fields")
-            except Exception as e:
-                logger.warning(f"Form fill failed: {e}")
+            # 5. Form filling (gated by config)
+            if self.config.form_fill.enabled:
+                try:
+                    fill_result = await self.form_filler.fill_all_forms(page)
+                    if fill_result["fields_filled"] > 0:
+                        logger.info(f"Filled {fill_result['fields_filled']} form fields")
+                    page_data["form_fill_result"] = fill_result
+                except Exception as e:
+                    logger.warning(f"Form fill failed: {e}")
 
-            # 6. Build journey step (screenshot_path must be a string per schema)
+            # 6. Build journey step
             step = JourneyStep(
                 step_number=step_num,
                 url=url,
                 title=title,
-                screenshot_path=screenshot_path or f"screenshots/step-{step_num:03d}.png",
+                screenshot_path=screenshot_path,
                 page_data=page_data,
             )
             self.journey.add_step(step)
@@ -683,6 +671,42 @@ class CrawleeAdapter:
         if interrupted:
             return self.journey
 
+        # Verify location via known PDP if configured
+        verify_url = getattr(self.config.location, "verify_url", None)
+        if verify_url and self.config.location.pincode:
+            try:
+                from playwright.async_api import async_playwright
+                async with async_playwright() as pw:
+                    browser = await pw.webkit.launch(headless=True)
+                    ctx = await browser.new_context(viewport=dict(viewport))
+                    if self.config.location.cookies_file:
+                        try:
+                            with open(self.config.location.cookies_file, "r") as f:
+                                loc_cookies = json.load(f)
+                            await ctx.add_cookies(loc_cookies)
+                        except Exception:
+                            pass
+                    vpage = await ctx.new_page()
+                    resp = await vpage.goto(verify_url, timeout=30000, wait_until="domcontentloaded")
+                    await vpage.wait_for_timeout(5000)
+                    has_product = await vpage.evaluate("""() => {
+                        const atc = document.querySelector('[class*="add-to-cart" i], [class*="addtocart" i], button[id*="add-to-cart" i]');
+                        const schema = document.querySelector('script[type="application/ld+json"]');
+                        const price = document.querySelector('[class*="price" i], [class*="selling" i]');
+                        const productName = document.querySelector('[class*="product-name" i], [class*="product-title" i], h1');
+                        return !!(atc || schema || price || productName);
+                    }""")
+                    if has_product and resp and resp.status < 400:
+                        self.journey.location_verified = True
+                        logger.info(f"Location verified via PDP: {verify_url}")
+                    else:
+                        self.journey.location_verified = False
+                        logger.warning(f"Location verification failed on crawlee path")
+                    await browser.close()
+            except Exception as e:
+                self.journey.location_verified = False
+                logger.warning(f"Location verification failed: {e}")
+
         # Complete journey
         self.journey.complete()
 
@@ -701,7 +725,12 @@ class CrawleeAdapter:
 
         Location/pincode panels are NOT dismissed here — they are session
         preconditions handled via cookie injection before navigation.
+        Elements matching location.panel_selectors are excluded from dismissal.
         """
+        location_panel_sels = []
+        if self.config and hasattr(self.config, "location"):
+            location_panel_sels = getattr(self.config.location, "panel_selectors", [])
+
         try:
             await page.keyboard.press("Escape")
             await page.wait_for_timeout(300)
@@ -725,30 +754,50 @@ class CrawleeAdapter:
             loc = page.locator(selector).first
             try:
                 if await loc.count() and await loc.is_visible():
+                    if location_panel_sels:
+                        is_inside = False
+                        for panel_sel in location_panel_sels:
+                            try:
+                                is_inside = await loc.evaluate(
+                                    f"el => el.closest('{panel_sel}') !== null"
+                                )
+                                if is_inside:
+                                    break
+                            except Exception:
+                                continue
+                        if is_inside:
+                            logger.debug("Skipping dismiss: element matches location panel")
+                            continue
                     await loc.click(timeout=2000)
                     await page.wait_for_timeout(400)
             except Exception:
                 continue
 
         try:
-            removed = await page.evaluate("""() => {
+            exclude_js = "false"
+            if location_panel_sels:
+                sel_list = ", ".join(location_panel_sels)
+                exclude_js = f"el.closest('{sel_list}') !== null"
+
+            removed = await page.evaluate(f"""() => {{
                 let n = 0;
                 const vw = window.innerWidth, vh = window.innerHeight;
                 for (const el of document.querySelectorAll(
                     '[class*="modal" i], [class*="overlay" i], ' +
                     '[class*="backdrop" i], [class*="popup" i]'
-                )) {
+                )) {{
+                    if ({exclude_js}) continue;
                     const s = getComputedStyle(el);
                     if (s.position !== 'fixed' && s.position !== 'absolute') continue;
                     if (s.display === 'none' || s.visibility === 'hidden') continue;
                     const r = el.getBoundingClientRect();
-                    if (r.width >= vw * 0.8 && r.height >= vh * 0.8) {
+                    if (r.width >= vw * 0.8 && r.height >= vh * 0.8) {{
                         el.style.display = 'none';
                         n++;
-                    }
-                }
+                    }}
+                }}
                 return n;
-            }""")
+            }}""")
             if removed:
                 logger.debug(f"Removed {removed} blocking overlay(s) via JS fallback")
         except Exception:

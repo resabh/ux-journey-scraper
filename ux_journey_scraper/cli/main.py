@@ -11,12 +11,9 @@ from ux_journey_scraper.core.crawl_orchestrator import CrawlOrchestrator
 from ux_journey_scraper.core.journey_recorder import Journey, JourneyRecorder
 from ux_journey_scraper.core.profile_manager import ProfileManager
 
-try:
-    from ux_journey_scraper.core.app_provisioner import AppProvisioner
+import importlib.util
 
-    _APPIUM_AVAILABLE = True
-except ImportError:
-    _APPIUM_AVAILABLE = False
+_APPIUM_AVAILABLE = importlib.util.find_spec("appium") is not None
 
 
 @click.group()
@@ -170,8 +167,8 @@ def info(journey_file):
 )
 @click.option(
     "--platforms",
-    default="web_desktop,web_mobile,native_android,native_ios",
-    help="Comma-separated platforms: web_desktop,web_mobile,native_android,native_ios",
+    default="web_desktop,web_mobile",
+    help="Comma-separated platforms: web_desktop,web_mobile,web_tablet,native_android,native_ios",
 )
 @click.option(
     "--output-dir", default="journey_output", help="Output directory for results"

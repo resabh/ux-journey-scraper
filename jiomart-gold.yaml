@@ -79,4 +79,25 @@ coverage:
 
 location:
   pincode: "400097"
+  enforce: true
   cookies_file: "journey_output/jiomart_gold/location_cookies_400097.json"
+  panel_selectors:
+    - '[class*="AddressFullscreenModal" i]'
+    - '[class*="address-modal" i]'
+    - '[class*="location-modal" i]'
+    - '[class*="pincode-modal" i]'
+  manual_trigger_text: "Select Location Manually"
+  input_selectors:
+    - "input.pac-target-input"
+    - 'input[placeholder*="area" i]'
+    - 'input[placeholder*="location" i]'
+    - 'input[placeholder*="pincode" i]'
+  suggestion_selectors:
+    - ".pac-item"
+    - '[class*="pac-item"]'
+    - '[class*="suggestion" i]'
+  confirm_selectors:
+    - "button.AddressFullscreenModal__confirm-button"
+    - 'button:has-text("Confirm Location")'
+    - 'button:has-text("Confirm")'
+  verify_url: "https://www.jiomart.com/product/maggi-2-minute-masala-instant-noodles-420-g-mffmtq-7507362"

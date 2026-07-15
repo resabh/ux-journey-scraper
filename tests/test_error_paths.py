@@ -81,13 +81,15 @@ class TestJourneyStepLoadHtml(unittest.TestCase):
         self.assertEqual(step.load_html(), "<html>from file</html>")
         Path(filepath).unlink()
 
-    def test_load_html_missing_file_returns_empty(self):
+    def test_load_html_missing_file_raises(self):
         step = JourneyStep(1, "https://example.com", "Home", None, {"html_path": "/nonexistent/file.html"})
-        self.assertEqual(step.load_html(), "")
+        with self.assertRaises(FileNotFoundError):
+            step.load_html()
 
-    def test_load_html_no_html_returns_empty(self):
+    def test_load_html_no_html_raises(self):
         step = JourneyStep(1, "https://example.com", "Home", None, {})
-        self.assertEqual(step.load_html(), "")
+        with self.assertRaises(KeyError):
+            step.load_html()
 
 
 class TestCrawleeAdapterValidation(unittest.TestCase):

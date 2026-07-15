@@ -52,13 +52,23 @@ class JourneyStep:
         self.timestamp = datetime.now().isoformat()
 
     def load_html(self) -> str:
-        """Load HTML content — from file if externalized, inline otherwise."""
+        """Load HTML content — from file if externalized, inline otherwise.
+
+        Raises:
+            KeyError: If step has neither html nor html_path
+            FileNotFoundError: If html_path is declared but the file is missing
+        """
+        if "html" in self.page_data:
+            return self.page_data["html"]
         html_path = self.page_data.get("html_path")
         if html_path:
             p = Path(html_path)
             if p.exists():
                 return p.read_text(encoding="utf-8")
-        return self.page_data.get("html", "")
+            raise FileNotFoundError(
+                f"HTML file not found for step {self.step_number}: {html_path}"
+            )
+        raise KeyError(f"No HTML in page_data for step {self.step_number}")
 
     def to_dict(self):
         """Convert step to dictionary."""
@@ -82,15 +92,17 @@ class Journey:
     """Represents a complete user journey."""
 
     def __init__(self, start_url, viewport=(1920, 1080),
-                 platform_type=None, user_agent=None):
+                 platform_type=None, user_agent=None, environment=None):
         self.start_url = start_url
         self.viewport = viewport
         self.platform_type = platform_type
         self.user_agent = user_agent
+        self.environment = environment
         self.steps = []
         self.errors = []
         self.start_time = datetime.now().isoformat()
         self.end_time = None
+        self.location_verified = None
 
     def add_step(self, step):
         """Add a step to the journey."""
@@ -120,6 +132,10 @@ class Journey:
             "total_steps": len(self.steps),
             "steps": [step.to_dict() for step in self.steps],
         }
+        if self.environment:
+            result["environment"] = self.environment
+        if self.location_verified is not None:
+            result["location_verified"] = self.location_verified
         if self.errors:
             result["errors"] = self.errors
             result["has_errors"] = True
@@ -202,6 +218,8 @@ class Journey:
         journey.start_time = data["start_time"]
         journey.end_time = data["end_time"]
         journey.errors = data.get("errors", [])
+        journey.environment = data.get("environment")
+        journey.location_verified = data.get("location_verified")
 
         for step_data in data["steps"]:
             step = JourneyStep(

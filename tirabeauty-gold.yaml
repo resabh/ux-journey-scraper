@@ -81,6 +81,8 @@ crawler:
   # disabling avoids the N+1 PII-scan hang (ADR p006)
   screenshot_blur_pii: false
 
+environment: prod
+
 coverage:
   enabled: true
   run_flows: true

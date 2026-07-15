@@ -16,22 +16,31 @@ class ComplianceDataCollector:
     """Captures network requests, cookies, localStorage, styles, and tab order."""
 
     def __init__(self):
-        self._requests: List[Dict] = []
+        pass
 
     def attach(self, page):
-        """Register network request listener. Call BEFORE any navigation."""
-        page.on("request", self._on_request)
+        """Register network request listener on a per-page bucket.
 
-    def _on_request(self, request):
-        """Accumulate network requests."""
-        try:
-            self._requests.append({
-                "url": request.url,
-                "method": request.method,
-                "resource_type": request.resource_type,
-            })
-        except Exception:
-            pass
+        Safe to call multiple times on the same page (idempotent).
+        The bucket lives on the page object itself so requests from
+        different pages never bleed into each other.
+        """
+        if getattr(page, "_ux_net_bucket", None) is not None:
+            return
+        bucket: List[Dict] = []
+        page._ux_net_bucket = bucket
+
+        def _on_request(request):
+            try:
+                bucket.append({
+                    "url": request.url,
+                    "method": request.method,
+                    "resource_type": request.resource_type,
+                })
+            except Exception:
+                pass
+
+        page.on("request", _on_request)
 
     async def collect(self, page, context) -> dict:
         """Collect all browser-state data for current page.
@@ -44,9 +53,12 @@ class ComplianceDataCollector:
         """
         result = {}
 
-        # Network requests (accumulated since last collect)
-        result["network_requests"] = list(self._requests)
-        self._requests.clear()
+        bucket = getattr(page, "_ux_net_bucket", None)
+        if bucket is not None:
+            result["network_requests"] = list(bucket)
+            bucket.clear()
+        else:
+            result["network_requests"] = []
 
         # Cookies
         try:
