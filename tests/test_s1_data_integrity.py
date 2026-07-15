@@ -562,6 +562,109 @@ class TestS113PdpAvailability(unittest.TestCase):
         self.assertFalse(pattern.search("Buy Now"))
 
 
+# --- P1a: block-aware capture + readiness (S1.10 item 6) ---
+
+class TestBlockAwareReadiness(unittest.TestCase):
+
+    def test_soft_error_signatures_detected(self):
+        from ux_journey_scraper.core.anti_crawler_detector import AntiCrawlerDetector
+        # tira SPA soft-error page (HTTP 200 with error UI)
+        self.assertTrue(
+            AntiCrawlerDetector.is_block_page(
+                "Tira: Shop", "Something went wrong Go to Home"
+            )
+        )
+
+    def test_block_signals_returns_matches(self):
+        from ux_journey_scraper.core.anti_crawler_detector import AntiCrawlerDetector
+        signals = AntiCrawlerDetector.block_signals(
+            "", "Something went wrong. Please go to home."
+        )
+        self.assertIn("something went wrong", signals)
+        self.assertIn("go to home", signals)
+
+    def test_block_signals_empty_on_live_page(self):
+        from ux_journey_scraper.core.anti_crawler_detector import AntiCrawlerDetector
+        signals = AntiCrawlerDetector.block_signals(
+            "Buy Maggi Noodles Online", "Add to Cart. Price Rs 100. In stock."
+        )
+        self.assertEqual(signals, [])
+
+    @patch("ux_journey_scraper.core.schema_validator.validate_journey_dict", return_value=[])
+    @patch("ux_journey_scraper.core.screenshot_manager.validate_screenshot", return_value=(True, ""))
+    def test_blocked_step_excluded_from_readiness(self, _mv, _ms):
+        from ux_journey_scraper.core.coverage_reporter import CoverageReporter
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            platform_dir = td / "flows_web_desktop"
+            platform_dir.mkdir()
+
+            steps = []
+            for i, pt in enumerate(
+                ["homepage", "plp", "pdp", "search_results", "cart"], 1
+            ):
+                steps.append({
+                    "step_number": i, "url": f"https://example.com/{pt}", "title": pt,
+                    "screenshot_path": f"screenshots/step-{i:03d}.png",
+                    "timestamp": "2026-07-08T00:00:00",
+                    "page_data": {"page_type": pt, "url": f"https://example.com/{pt}",
+                                  "title": pt, "page_state": "live",
+                                  "navigation": {"primary_nav": [{"text": "Home"}]},
+                                  "forms": [{"action": "/search"}],
+                                  "search": {"has_search_bar": True}},
+                })
+            # Add a blocked step masquerading as search_results
+            steps.append({
+                "step_number": 6, "url": "https://example.com/blocked", "title": "Error",
+                "screenshot_path": "screenshots/step-006.png",
+                "timestamp": "2026-07-08T00:00:00",
+                "page_data": {"page_type": "search_results", "url": "https://example.com/blocked",
+                              "title": "Error", "page_state": "blocked",
+                              "response_metadata": {"status": 200, "blocked": True,
+                                                    "block_signals": ["something went wrong"]}},
+            })
+            journey = {
+                "schema_version": "2.3", "start_url": "https://example.com",
+                "viewport": {"width": 1920, "height": 1080},
+                "platform": {"type": "web_desktop"},
+                "start_time": "2026-07-08T00:00:00", "end_time": "2026-07-08T00:01:00",
+                "total_steps": len(steps), "steps": steps,
+            }
+            (platform_dir / "journey.json").write_text(json.dumps(journey))
+
+            reporter = CoverageReporter()
+            results = reporter.emit_readiness(td)
+            readiness = results.get("flows_web_desktop", {})
+            self.assertFalse(readiness["no_blocked_steps"])
+            self.assertIn(6, readiness.get("blocked_steps", []))
+            self.assertFalse(readiness["benchmark_ready"])
+
+    def test_combined_readiness_has_environment(self):
+        from ux_journey_scraper.core.coverage_reporter import CoverageReporter
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            platform_dir = td / "web_desktop"
+            platform_dir.mkdir()
+            journey = {
+                "schema_version": "2.3", "start_url": "https://example.com",
+                "viewport": {"width": 1920, "height": 1080},
+                "environment": "prod",
+                "start_time": "2026-07-08T00:00:00", "end_time": "2026-07-08T00:01:00",
+                "total_steps": 1,
+                "steps": [{"step_number": 1, "url": "https://example.com", "title": "A",
+                           "screenshot_path": None, "timestamp": "2026-07-08T00:00:00",
+                           "page_data": {"page_type": "homepage", "page_state": "live"}}],
+            }
+            (platform_dir / "journey.json").write_text(json.dumps(journey))
+            reporter = CoverageReporter()
+            reporter.emit_readiness(td)
+            combined = json.loads((td / "readiness_web_desktop.json").read_text())
+            self.assertEqual(combined["environment"], "prod")
+            self.assertIn("no_blocked_steps", combined)
+
+
 # --- Journey location_verified serialization ---
 
 class TestJourneyLocationVerified(unittest.TestCase):

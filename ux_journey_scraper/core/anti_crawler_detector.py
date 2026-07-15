@@ -31,6 +31,12 @@ BLOCK_SIGNATURES = [
     "cf-browser-verification",
     "please wait while we verify",
     "pardon our interruption",
+    # SPA soft-error / error-boundary pages (return HTTP 200 with error UI)
+    "something went wrong",
+    "go to home",
+    "page not found",
+    "page isn't working",
+    "page can't be found",
 ]
 
 # Regex patterns for pagination URL segments
@@ -166,3 +172,13 @@ class AntiCrawlerDetector:
         """
         combined = f"{title} {text_preview}".lower()
         return any(sig in combined for sig in BLOCK_SIGNATURES)
+
+    @staticmethod
+    def block_signals(title: str, text_preview: str) -> List[str]:
+        """Return the list of block/error signatures present on the page.
+
+        Empty list means no block signal detected. Used to record which
+        signals fired in per-step response_metadata for later diagnosis.
+        """
+        combined = f"{title} {text_preview}".lower()
+        return [sig for sig in BLOCK_SIGNATURES if sig in combined]

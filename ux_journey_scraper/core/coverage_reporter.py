@@ -260,9 +260,18 @@ class CoverageReporter:
             forms_populated = False
             search_detected = False
             screenshots_ok = True
+            blocked_steps = []
 
             for step in steps:
                 pd = step.get("page_data", {})
+
+                # Skip block/error pages — they must not count toward coverage
+                # or quality signals (S1.10 item 6 / page_state).
+                if pd.get("page_state") == "blocked" or \
+                        pd.get("response_metadata", {}).get("blocked"):
+                    blocked_steps.append(step.get("step_number"))
+                    continue
+
                 pt = pd.get("page_type", "other")
                 pt = PAGE_TYPE_ALIASES.get(pt, pt)
                 page_types.add(pt)
@@ -289,6 +298,8 @@ class CoverageReporter:
                     is_valid, _ = validate_screenshot(resolved)
                     if not is_valid:
                         screenshots_ok = False
+
+            no_blocked_steps = len(blocked_steps) == 0
 
             present = sorted(page_types & REQUIRED_PAGE_TYPES)
             missing = sorted(REQUIRED_PAGE_TYPES - page_types)
@@ -331,6 +342,7 @@ class CoverageReporter:
                 and screenshots_ok
                 and schema_valid
                 and location_established
+                and no_blocked_steps
             )
 
             readiness = {
@@ -343,11 +355,14 @@ class CoverageReporter:
                 "screenshots_per_step": screenshots_ok,
                 "schema_valid": schema_valid,
                 "location_established": location_established,
+                "no_blocked_steps": no_blocked_steps,
                 "environment": data.get("environment", "prod"),
                 "capture_start": data.get("start_time", ""),
                 "capture_end": data.get("end_time", ""),
                 "benchmark_ready": benchmark_ready,
             }
+            if blocked_steps:
+                readiness["blocked_steps"] = blocked_steps
             if duplicate_groups:
                 readiness["duplicate_frames"] = duplicate_groups
 
@@ -375,6 +390,8 @@ class CoverageReporter:
                     "screenshots_ok": True,
                     "schema_valid": True,
                     "location_established": True,
+                    "no_blocked_steps": True,
+                    "environment": "prod",
                     "dirs": [],
                 }
             g = platform_groups[base]
@@ -385,6 +402,8 @@ class CoverageReporter:
             g["screenshots_ok"] = g["screenshots_ok"] and r.get("screenshots_per_step", True)
             g["schema_valid"] = g["schema_valid"] and r.get("schema_valid", True)
             g["location_established"] = g["location_established"] and r.get("location_established", True)
+            g["no_blocked_steps"] = g["no_blocked_steps"] and r.get("no_blocked_steps", True)
+            g["environment"] = r.get("environment", g["environment"])
             g["dirs"].append(dir_name)
 
         for base, g in platform_groups.items():
@@ -398,6 +417,7 @@ class CoverageReporter:
                 and g["screenshots_ok"]
                 and g["schema_valid"]
                 and location_established
+                and g["no_blocked_steps"]
             )
             combined = {
                 "page_types_present": present,
@@ -409,6 +429,8 @@ class CoverageReporter:
                 "screenshots_per_step": g["screenshots_ok"],
                 "schema_valid": g["schema_valid"],
                 "location_established": location_established,
+                "no_blocked_steps": g["no_blocked_steps"],
+                "environment": g["environment"],
                 "benchmark_ready": benchmark_ready,
                 "combined_from": g["dirs"],
             }

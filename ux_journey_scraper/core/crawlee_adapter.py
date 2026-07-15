@@ -602,6 +602,22 @@ class CrawleeAdapter:
                 except Exception as e:
                     logger.warning(f"Form fill failed: {e}")
 
+            # Response metadata + page_state (S1.10 item 6). Block pages return
+            # early above, so captured crawlee steps are always "live"; record
+            # the metadata for consistency with the flows path.
+            status = None
+            try:
+                if context.response is not None:
+                    status = context.response.status
+            except Exception:
+                status = None
+            page_data["response_metadata"] = {
+                "status": status,
+                "blocked": False,
+                "block_signals": [],
+            }
+            page_data["page_state"] = "live"
+
             # 6. Build journey step
             step = JourneyStep(
                 step_number=step_num,

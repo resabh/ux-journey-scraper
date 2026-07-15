@@ -21,6 +21,7 @@ from urllib.parse import quote_plus, urlparse
 
 from playwright.async_api import async_playwright
 
+from ux_journey_scraper.core.anti_crawler_detector import AntiCrawlerDetector
 from ux_journey_scraper.core.journey_recorder import Journey, JourneyStep
 from ux_journey_scraper.core.page_analyzer import PageAnalyzer
 from ux_journey_scraper.core.page_classifier import PageClassifier
@@ -116,6 +117,8 @@ class FlowRunner:
             environment=getattr(config, "environment", None),
         )
         self.step_num = 0
+        # Track the most recent navigation response for per-step metadata
+        self._last_response_status = None
 
     async def run(self, pdp_urls=None, search_term: str = "headphones") -> Journey:
         """Execute all directed flows. Each flow is independent — one failing
@@ -786,26 +789,57 @@ class FlowRunner:
     # ----- helpers ----------------------------------------------------------
 
     async def _goto(self, page, url: str) -> bool:
-        try:
-            response = await page.goto(
-                url, timeout=45000, wait_until="domcontentloaded"
-            )
-            await page.wait_for_timeout(2500)
-            if response is not None and response.status >= 400:
-                logger.info(f"goto {url[:80]} → HTTP {response.status}")
-                return False
-            # p007 parity: force declared viewport after navigation so
-            # screenshots match the declared dimensions (same as crawlee_adapter)
+        """Navigate to url. Retries once with a cooldown if a block/error page
+        is detected (HTTP 200 with error UI — common on anti-automation SPAs).
+        Stores the response status for per-step response_metadata.
+        """
+        for attempt in range(2):
             try:
-                await page.set_viewport_size({
-                    "width": self.viewport["width"],
-                    "height": self.viewport["height"],
-                })
+                response = await page.goto(
+                    url, timeout=45000, wait_until="domcontentloaded"
+                )
+                await page.wait_for_timeout(2500)
+                self._last_response_status = (
+                    response.status if response is not None else None
+                )
+                if response is not None and response.status >= 400:
+                    logger.info(f"goto {url[:80]} → HTTP {response.status}")
+                    return False
+
+                # Detect block/soft-error pages (return HTTP 200 with error UI)
+                if await self._is_blocked(page):
+                    if attempt == 0:
+                        logger.info(f"goto {url[:80]} → block/error page, retrying after cooldown")
+                        await page.wait_for_timeout(8000)
+                        continue
+                    logger.warning(f"goto {url[:80]} → still blocked after retry")
+                    return False
+
+                # p007 parity: force declared viewport after navigation so
+                # screenshots match the declared dimensions (same as crawlee_adapter)
+                try:
+                    await page.set_viewport_size({
+                        "width": self.viewport["width"],
+                        "height": self.viewport["height"],
+                    })
+                except Exception as e:
+                    logger.debug(f"set_viewport_size failed: {e}")
+                return True
             except Exception as e:
-                logger.debug(f"set_viewport_size failed: {e}")
-            return True
-        except Exception as e:
-            logger.info(f"goto failed {url[:80]}: {e}")
+                logger.info(f"goto failed {url[:80]}: {e}")
+                self._last_response_status = None
+                return False
+        return False
+
+    async def _is_blocked(self, page) -> bool:
+        """Return True if the current page is a block/challenge/soft-error page."""
+        try:
+            title = await page.title() or ""
+            text_preview = await page.evaluate(
+                "document.body?.innerText?.slice(0, 500) || ''"
+            )
+            return AntiCrawlerDetector.is_block_page(title, text_preview)
+        except Exception:
             return False
 
     async def _find_add_to_cart(self, page):
@@ -986,6 +1020,23 @@ class FlowRunner:
         page_data["flow"] = flow
         if extra:
             page_data.update(extra)
+
+        # Response metadata + page_state (S1.10 item 6) — record whether this
+        # step landed on a block/error page so readiness can exclude it.
+        try:
+            text_preview = await page.evaluate(
+                "document.body?.innerText?.slice(0, 500) || ''"
+            )
+        except Exception:
+            text_preview = ""
+        block_signals = AntiCrawlerDetector.block_signals(title, text_preview)
+        page_data["response_metadata"] = {
+            "status": self._last_response_status,
+            "blocked": bool(block_signals),
+            "block_signals": block_signals,
+        }
+        page_data["page_state"] = "blocked" if block_signals else "live"
+
         try:
             page_data["device_pixel_ratio"] = await page.evaluate("window.devicePixelRatio")
             page_data["rendered_viewport"] = page.viewport_size
