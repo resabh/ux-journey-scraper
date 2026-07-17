@@ -423,6 +423,26 @@ class TestS114DuplicateFrames(unittest.TestCase):
 
 class TestS16LocationReadiness(unittest.TestCase):
 
+    def test_enforce_requires_verify_url(self):
+        """p077: enforce=True without verify_url must fail closed at load —
+        otherwise the breaker can never fire (verify_location fails open)."""
+        with self.assertRaises(ValueError):
+            LocationConfig(pincode="400097", enforce=True, verify_url="")
+
+    def test_enforce_with_verify_url_ok(self):
+        """enforce=True is accepted when a verify_url is present."""
+        cfg = LocationConfig(
+            pincode="400097", enforce=True,
+            verify_url="https://example.com/product/x",
+        )
+        self.assertTrue(cfg.enforce)
+        self.assertEqual(cfg.verify_url, "https://example.com/product/x")
+
+    def test_enforce_off_without_verify_url_ok(self):
+        """Non-hyperlocal default (enforce=False) is unaffected by the guard."""
+        cfg = LocationConfig(pincode="400097")
+        self.assertFalse(cfg.enforce)
+
     @patch("ux_journey_scraper.core.screenshot_manager.validate_screenshot", return_value=(True, ""))
     def test_location_fail_closed_when_unverified(self, _mock_validate):
         from ux_journey_scraper.core.coverage_reporter import CoverageReporter

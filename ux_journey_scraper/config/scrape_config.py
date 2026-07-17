@@ -299,6 +299,16 @@ class LocationConfig:
     verify_url: str = ""
 
     def __post_init__(self):
+        # enforce=True must have something to verify against, otherwise the
+        # breaker is a silent no-op that still reports location_verified=True
+        # (verify_location() fails open when verify_url is unset — the exact
+        # fail-open the S1.6 vetting told us to close). Fail closed at load.
+        if self.enforce and not self.verify_url:
+            raise ValueError(
+                "location.enforce=True requires location.verify_url "
+                "(a known PDP to verify establishment against) — "
+                "without it the circuit breaker can never fire."
+            )
         if self.cookies_file:
             p = Path(self.cookies_file)
             if not p.exists():
