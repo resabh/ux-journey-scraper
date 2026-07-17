@@ -31,7 +31,11 @@ from ux_journey_scraper.core.page_readiness import PageReadinessEngine
 from ux_journey_scraper.core.screenshot_manager import ScreenshotManager
 from ux_journey_scraper.core.session_preconditions import (
     OCCLUSION_THRESHOLD,
+    LocationError,
+    establish_location,
+    load_carrier_bundle,
     measure_occlusion,
+    seed_storage_state,
 )
 from ux_journey_scraper.core.sitemap_parser import SitemapParser
 
@@ -138,6 +142,8 @@ class CrawleeAdapter:
         self.pages_captured = 0
         self.captured_urls = set()
         self.consecutive_blocks = 0
+        # Location carrier bundle (storage_state) from the establishment phase
+        self._location_bundle = None
 
     def _is_block_page(self, title: str, text_preview: str) -> bool:
         """Check if the current page is a block/CAPTCHA page."""
@@ -312,15 +318,19 @@ class CrawleeAdapter:
         async def on_before_navigation(context):
             page = context.page
 
-            # Location precondition: inject location cookies BEFORE any navigation
-            if self.config.location.cookies_file:
+            # Location precondition: seed the storage_state carrier bundle
+            # (cookies + localStorage) into every incognito page BEFORE any
+            # navigation (S1.6 mechanism 2). Bundle produced by the pre-crawl
+            # establishment phase; falls back to the on-disk carrier file.
+            bundle = self._location_bundle
+            if bundle is None and self.config.location.cookies_file:
+                bundle = load_carrier_bundle(self.config.location)
+            if bundle:
                 try:
-                    with open(self.config.location.cookies_file, "r") as f:
-                        loc_cookies = json.load(f)
-                    await page.context.add_cookies(loc_cookies)
-                    logger.debug(f"Location cookies injected from {self.config.location.cookies_file}")
+                    await seed_storage_state(page.context, bundle)
+                    logger.debug("Location carrier bundle seeded into incognito page")
                 except Exception as e:
-                    logger.warning(f"Location cookie injection failed: {e}")
+                    logger.warning(f"Location bundle seed failed: {e}")
 
             # Inject cookies from jar
             cookies = self.cookie_jar.get(self.base_domain)
@@ -443,7 +453,22 @@ class CrawleeAdapter:
             except Exception as e:
                 logger.warning(f"set_viewport_size failed: {e}")
 
-            # === OVERLAY DISMISSAL (location/pincode popups, cookie banners) ===
+            # === LOCATION RE-FILL (mid-session panel detect BEFORE dismissal) ===
+            # Standing owner rule: a location panel is a precondition to FILL,
+            # never a popup to dismiss (S1.6 mechanism 3 / S1.12). If it
+            # reappeared mid-session, re-FILL rather than let dismissal nuke it.
+            if self.config.location.pincode:
+                try:
+                    from ux_journey_scraper.core.session_preconditions import (
+                        location_panel_visible, fill_location,
+                    )
+                    if await location_panel_visible(page, self.config.location):
+                        logger.info("Location panel reappeared mid-session — re-filling")
+                        await fill_location(page, self.config.location)
+                except Exception as e:
+                    logger.debug(f"Mid-session location re-fill failed: {e}")
+
+            # === OVERLAY DISMISSAL (cookie banners, newsletter, app-install) ===
             try:
                 await self._dismiss_overlays(page)
             except Exception as e:
@@ -653,6 +678,40 @@ class CrawleeAdapter:
             logger.debug(f"Inter-page delay: {delay:.1f}s ({page_type})")
             await asyncio.sleep(delay)
 
+        # Location establishment phase (S1.6 mechanism 3): before the main
+        # crawl, FILL the location panel + verify via PDP on a dedicated page,
+        # capturing the storage_state carrier bundle that is then seeded into
+        # every incognito page. enforce=True aborts the run on failure.
+        if self.config.location.pincode:
+            try:
+                from playwright.async_api import async_playwright
+                async with async_playwright() as pw:
+                    launcher = getattr(pw, self.browser_type, pw.webkit)
+                    est_browser = await launcher.launch(headless=self.config.crawler.headless)
+                    est_ctx = await est_browser.new_context(viewport=dict(viewport))
+                    # Seed any prior on-disk carrier first (optimization)
+                    prior = load_carrier_bundle(self.config.location)
+                    if prior:
+                        await seed_storage_state(est_ctx, prior)
+                    verified, bundle = await establish_location(
+                        est_ctx, self.config.location, self.config.base_url
+                    )
+                    self._location_bundle = bundle
+                    self.journey.location_verified = verified
+                    await est_browser.close()
+                if not verified and getattr(self.config.location, "enforce", False):
+                    raise LocationError(
+                        f"Location establishment failed with enforce=True "
+                        f"(pincode={self.config.location.pincode})"
+                    )
+            except LocationError:
+                raise
+            except Exception as e:
+                logger.warning(f"Location establishment phase error: {e}")
+                self.journey.location_verified = False
+                if getattr(self.config.location, "enforce", False):
+                    raise LocationError(f"Location establishment errored with enforce=True: {e}")
+
         # Graceful shutdown: save journey on SIGINT/SIGTERM
         interrupted = False
         loop = asyncio.get_running_loop()
@@ -698,42 +757,6 @@ class CrawleeAdapter:
 
         if interrupted:
             return self.journey
-
-        # Verify location via known PDP if configured
-        verify_url = getattr(self.config.location, "verify_url", None)
-        if verify_url and self.config.location.pincode:
-            try:
-                from playwright.async_api import async_playwright
-                async with async_playwright() as pw:
-                    browser = await pw.webkit.launch(headless=True)
-                    ctx = await browser.new_context(viewport=dict(viewport))
-                    if self.config.location.cookies_file:
-                        try:
-                            with open(self.config.location.cookies_file, "r") as f:
-                                loc_cookies = json.load(f)
-                            await ctx.add_cookies(loc_cookies)
-                        except Exception:
-                            pass
-                    vpage = await ctx.new_page()
-                    resp = await vpage.goto(verify_url, timeout=30000, wait_until="domcontentloaded")
-                    await vpage.wait_for_timeout(5000)
-                    has_product = await vpage.evaluate("""() => {
-                        const atc = document.querySelector('[class*="add-to-cart" i], [class*="addtocart" i], button[id*="add-to-cart" i]');
-                        const schema = document.querySelector('script[type="application/ld+json"]');
-                        const price = document.querySelector('[class*="price" i], [class*="selling" i]');
-                        const productName = document.querySelector('[class*="product-name" i], [class*="product-title" i], h1');
-                        return !!(atc || schema || price || productName);
-                    }""")
-                    if has_product and resp and resp.status < 400:
-                        self.journey.location_verified = True
-                        logger.info(f"Location verified via PDP: {verify_url}")
-                    else:
-                        self.journey.location_verified = False
-                        logger.warning(f"Location verification failed on crawlee path")
-                    await browser.close()
-            except Exception as e:
-                self.journey.location_verified = False
-                logger.warning(f"Location verification failed: {e}")
 
         # Complete journey
         self.journey.complete()

@@ -26,7 +26,13 @@ from ux_journey_scraper.core.journey_recorder import Journey, JourneyStep
 from ux_journey_scraper.core.page_analyzer import PageAnalyzer
 from ux_journey_scraper.core.session_preconditions import (
     OCCLUSION_THRESHOLD,
+    LocationError,
+    fill_location,
+    load_carrier_bundle,
+    location_panel_visible,
     measure_occlusion,
+    seed_storage_state,
+    verify_location,
 )
 from ux_journey_scraper.core.page_classifier import PageClassifier
 from ux_journey_scraper.core.screenshot_manager import ScreenshotManager
@@ -195,15 +201,18 @@ class FlowRunner:
                 """
             )
 
-            # Location precondition: inject location cookies BEFORE any navigation
+            # Location precondition: seed the storage_state carrier bundle
+            # (cookies + localStorage) BEFORE any navigation (S1.6 mechanism 2).
             if self.config.location.cookies_file:
-                try:
-                    with open(self.config.location.cookies_file, "r") as f:
-                        loc_cookies = json.load(f)
-                    await context.add_cookies(loc_cookies)
-                    logger.debug(f"Location cookies injected from {self.config.location.cookies_file}")
-                except Exception as e:
-                    logger.warning(f"Location cookie injection failed: {e}")
+                bundle = load_carrier_bundle(self.config.location)
+                if bundle:
+                    try:
+                        await seed_storage_state(context, bundle)
+                        logger.debug(
+                            f"Location carrier bundle seeded from {self.config.location.cookies_file}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Location bundle seed failed: {e}")
 
             if self.cookie_jar:
                 cookies = self.cookie_jar.get(self.base_domain)
@@ -603,192 +612,48 @@ class FlowRunner:
     # ----- location solve ----------------------------------------------------
 
     async def _solve_location(self, page):
-        """Programmatic location solve for hyperlocal sites.
+        """Programmatic location solve for hyperlocal sites (S1.6).
 
-        Navigates to base_url, detects the address panel, and completes the
-        location flow via Google Places autocomplete. Persists resulting
-        cookies back to cookies_file so subsequent sessions can skip the solve.
-        Always verifies via PDP load regardless of whether the fill was needed.
+        Delegates to the shared session_preconditions seam: FILL the panel if
+        it appears, verify via known PDP, record location_verified. When
+        location.enforce=True and verification fails, raises LocationError to
+        abort the session (the run-level circuit breaker, mechanism 1).
         """
-        pincode = self.config.location.pincode
-        if not pincode:
+        location_cfg = self.config.location
+        if not getattr(location_cfg, "pincode", ""):
             return
 
-        if not await self._goto(page, self.base_url):
-            logger.warning("Location solve: could not load base URL")
+        try:
+            await page.goto(self.base_url, timeout=45000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(2500)
+        except Exception as e:
+            logger.warning(f"Location solve: could not load base URL: {e}")
+            self.journey.location_verified = False
+            if getattr(location_cfg, "enforce", False):
+                raise LocationError("Location base URL load failed with enforce=True")
             return
-        await page.wait_for_timeout(2000)
 
-        # Check if location panel is visible (needs fill)
-        panel_visible = False
-        for panel_selector in (
-            '[class*="AddressFullscreenModal" i]',
-            '[class*="address-modal" i]',
-            '[class*="location-modal" i]',
-            '[class*="pincode-modal" i]',
-        ):
+        if await location_panel_visible(page, location_cfg):
+            await fill_location(page, location_cfg)
+            # Seeded state may now be stale; capture the fresh bundle
             try:
-                loc = page.locator(panel_selector).first
-                if await loc.count() and await loc.is_visible():
-                    panel_visible = True
-                    break
-            except Exception:
-                continue
-
-        if not panel_visible:
-            try:
-                select_loc = page.get_by_text("Select Location Manually")
-                if await select_loc.count() and await select_loc.is_visible():
-                    panel_visible = True
-            except Exception:
-                pass
-
-        if panel_visible:
-            await self._fill_location(page, pincode)
+                bundle = await page.context.storage_state()
+                carrier = getattr(location_cfg, "cookies_file", None)
+                if bundle and carrier:
+                    Path(carrier).parent.mkdir(parents=True, exist_ok=True)
+                    Path(carrier).write_text(json.dumps(bundle, indent=2))
+            except Exception as e:
+                logger.debug(f"Location solve: bundle save failed: {e}")
         else:
-            logger.info("Location solve: no address panel detected — location may already be set via cookies")
+            logger.info("Location solve: no panel — may already be set via seeded state")
 
-        # Always verify via PDP load — whether fill was needed or cookies sufficed
-        await self._verify_location_pdp(page)
-
-    async def _fill_location(self, page, pincode):
-        """Fill the location modal with pincode and confirm."""
-        # Step 1: Click "Select Location Manually"
-        try:
-            manual_btn = page.get_by_text("Select Location Manually")
-            if await manual_btn.count() and await manual_btn.is_visible():
-                await manual_btn.click(timeout=5000)
-                await page.wait_for_timeout(1500)
-        except Exception as e:
-            logger.debug(f"Location solve: 'Select Location Manually' click: {e}")
-
-        # Step 2: Type pincode/area into the Google Places input
-        places_input = page.locator("input.pac-target-input").first
-        try:
-            if not (await places_input.count() and await places_input.is_visible()):
-                for fallback in (
-                    'input[placeholder*="area" i]',
-                    'input[placeholder*="location" i]',
-                    'input[placeholder*="pincode" i]',
-                    'input[placeholder*="search" i]',
-                ):
-                    places_input = page.locator(fallback).first
-                    if await places_input.count() and await places_input.is_visible():
-                        break
-
-            await places_input.fill("")
-            await places_input.type(pincode, delay=80)
-            await page.wait_for_timeout(2000)
-        except Exception as e:
-            logger.warning(f"Location solve: could not type into places input: {e}")
-            return
-
-        # Step 3: Click the first Google Places suggestion
-        suggestion_clicked = False
-        for suggestion_sel in (".pac-item", '[class*="pac-item"]', '[class*="suggestion" i]'):
-            try:
-                suggestion = page.locator(suggestion_sel).first
-                if await suggestion.count() and await suggestion.is_visible():
-                    await suggestion.click(timeout=5000)
-                    suggestion_clicked = True
-                    break
-            except Exception:
-                continue
-
-        if not suggestion_clicked:
-            logger.warning("Location solve: no autocomplete suggestion appeared")
-            return
-
-        await page.wait_for_timeout(1500)
-
-        # Step 4: Click "Confirm Location"
-        confirm_clicked = False
-        for confirm_sel in (
-            'button.AddressFullscreenModal__confirm-button',
-            'button:has-text("Confirm Location")',
-            'button:has-text("Confirm")',
-            '[class*="confirm" i] button',
-        ):
-            try:
-                confirm = page.locator(confirm_sel).first
-                if await confirm.count() and await confirm.is_visible():
-                    await confirm.click(timeout=5000)
-                    confirm_clicked = True
-                    break
-            except Exception:
-                continue
-
-        if not confirm_clicked:
-            logger.warning("Location solve: could not click confirm button")
-            return
-
-        await page.wait_for_timeout(4000)
-        logger.info(f"Location solve: completed fill for pincode {pincode}")
-
-        # Persist cookies
-        cookies_file = self.config.location.cookies_file
-        if cookies_file:
-            try:
-                cookies = await page.context.cookies()
-                loc_cookies = [
-                    c for c in cookies
-                    if any(k in c.get("name", "") for k in (
-                        "location", "geolocation", "pincode", "address",
-                        "polygon", "city", "lat", "lng",
-                    ))
-                ]
-                if not loc_cookies:
-                    logger.warning("Location solve: no location-matching cookies found, skipping save")
-                else:
-                    Path(cookies_file).parent.mkdir(parents=True, exist_ok=True)
-                    with open(cookies_file, "w") as f:
-                        json.dump(loc_cookies, f, indent=2)
-                    logger.info(f"Location cookies saved to {cookies_file} ({len(loc_cookies)} cookies)")
-            except Exception as e:
-                logger.warning(f"Location solve: cookie save failed: {e}")
-
-    async def _verify_location_pdp(self, page):
-        """Verify location is established by loading a known PDP."""
-        verify_url = getattr(self.config.location, "verify_url", None)
-        if not verify_url:
-            self.journey.location_verified = True
-            logger.info("Location solve: no verify_url configured, marking verified")
-            return
-
-        for attempt in range(2):
-            try:
-                resp = await page.goto(verify_url, timeout=30000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(5000)
-                # Dismiss any overlay that appeared after navigation
-                try:
-                    await page.keyboard.press("Escape")
-                    await page.wait_for_timeout(500)
-                except Exception:
-                    pass
-                has_product = await page.evaluate("""() => {
-                    const atc = document.querySelector('[class*="add-to-cart" i], [class*="addtocart" i], button[id*="add-to-cart" i]');
-                    const schema = document.querySelector('script[type="application/ld+json"]');
-                    const price = document.querySelector('[class*="price" i], [class*="selling" i]');
-                    const productName = document.querySelector('[class*="product-name" i], [class*="product-title" i], h1');
-                    return !!(atc || schema || price || productName);
-                }""")
-                if has_product and resp and resp.status < 400:
-                    self.journey.location_verified = True
-                    logger.info(f"Location verified via PDP: {verify_url}")
-                    return
-                elif attempt == 0:
-                    logger.debug(f"Location verify attempt 1 failed, retrying...")
-                    await page.wait_for_timeout(3000)
-                else:
-                    self.journey.location_verified = False
-                    logger.warning(f"Location verification failed: product signal not found at {verify_url}")
-            except Exception as e:
-                if attempt == 1:
-                    self.journey.location_verified = False
-                    logger.warning(f"Location verification failed: {e}")
-                else:
-                    logger.debug(f"Location verify attempt 1 error: {e}")
-                    await page.wait_for_timeout(2000)
+        verified = await verify_location(page, location_cfg)
+        self.journey.location_verified = verified
+        if not verified and getattr(location_cfg, "enforce", False):
+            raise LocationError(
+                f"Location verification failed with enforce=True "
+                f"(pincode={location_cfg.pincode})"
+            )
 
     # ----- helpers ----------------------------------------------------------
 
