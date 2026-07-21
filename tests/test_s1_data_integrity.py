@@ -365,6 +365,59 @@ class TestS110ScreenshotValidation(unittest.TestCase):
             Path(path).unlink()
 
 
+class TestS110Calibration(unittest.TestCase):
+    """S1.10 exit-criterion 5: the garbage-frame calibration corpus is
+    committed as a fixture so the 6.0 gradient threshold stays anchored to
+    real data. Raw frames are 45-152MB glyph walls; committed fixtures are
+    real-data crops (bad) + small whole/cropped good frames, with a manifest
+    recording the full-frame census (paths, gradients, failure modes, sha256).
+    """
+
+    FIX = Path(__file__).parent / "fixtures" / "screenshot_calibration"
+
+    def _manifest(self):
+        return json.loads((self.FIX / "manifest.json").read_text())
+
+    def test_manifest_present_and_shaped(self):
+        m = self._manifest()
+        self.assertEqual(m["gradient_threshold"], 6.0)
+        self.assertEqual(len(m["bad"]), 10, "census is 10 garbage frames")
+        self.assertGreaterEqual(len(m["good"]), 3)
+        # 4 tablet frames exceed PIL's pixel limit -> real failure_mode size_limit
+        modes = [b["real_failure_mode"] for b in m["bad"]]
+        self.assertEqual(modes.count("size_limit"), 4)
+        self.assertEqual(modes.count("gradient"), 6)
+
+    def test_bad_crops_rejected(self):
+        from ux_journey_scraper.core.screenshot_manager import validate_screenshot
+        m = self._manifest()
+        for b in m["bad"]:
+            path = self.FIX / b["crop_file"]
+            self.assertTrue(path.exists(), f"missing fixture {path}")
+            valid, err = validate_screenshot(str(path))
+            self.assertFalse(valid, f"garbage crop should be rejected: {b['crop_file']}")
+            self.assertIn("garbage", err)
+
+    def test_good_frames_pass(self):
+        from ux_journey_scraper.core.screenshot_manager import validate_screenshot
+        m = self._manifest()
+        for g in m["good"]:
+            path = self.FIX / (g.get("crop_file") or g["file"])
+            self.assertTrue(path.exists(), f"missing fixture {path}")
+            valid, err = validate_screenshot(str(path))
+            self.assertTrue(valid, f"good frame should pass but got: {err} ({path.name})")
+
+    def test_recorded_gradients_straddle_threshold(self):
+        m = self._manifest()
+        thr = m["gradient_threshold"]
+        # every committed bad crop measures >= threshold; every good < threshold
+        for b in m["bad"]:
+            self.assertGreaterEqual(b["crop_gradient"], thr, b["crop_file"])
+        for g in m["good"]:
+            grad = g.get("crop_gradient", g.get("gradient"))
+            self.assertLess(grad, thr, g.get("crop_file") or g["file"])
+
+
 # --- S1.14: duplicate frame detection ---
 
 class TestS114DuplicateFrames(unittest.TestCase):
